@@ -26,7 +26,7 @@ class EmailClient:
         self.smtp_use_tls = self.email_server.use_ssl
         self.smtp_start_tls = self.email_server.start_ssl
 
-    def _parse_email_data(self, raw_email: bytes, uid: str) -> dict[str, Any]:  # noqa: C901
+    def _parse_email_data(self, raw_email: bytes, uid: str, flags: list[str] | None = None) -> dict[str, Any]:  # noqa: C901
         """Parse raw email data into a structured dictionary."""
         parser = BytesParser(policy=default)
         email_message = parser.parsebytes(raw_email)
@@ -83,6 +83,7 @@ class EmailClient:
             "body": body,
             "date": date,
             "attachments": attachments,
+            "flags": flags or [],
         }
 
     async def get_emails_stream(  # noqa: C901
@@ -97,6 +98,8 @@ class EmailClient:
         from_address: str | None = None,
         to_address: str | None = None,
         order: str = "desc",
+        unread_only: bool = False,
+        flagged_only: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
         imap = self.imap_class(self.email_server.host, self.email_server.port)
         try:
@@ -112,7 +115,7 @@ class EmailClient:
                 logger.warning(f"IMAP ID command failed: {e!s}")
             await imap.select("INBOX")
 
-            search_criteria = self._build_search_criteria(before, since, subject, body, text, from_address, to_address)
+            search_criteria = self._build_search_criteria(before, since, subject, body, text, from_address, to_address, unread_only, flagged_only)
             logger.info(f"Get: Search criteria: {search_criteria}")
 
             # Search for messages - use UID SEARCH for better compatibility
@@ -138,8 +141,28 @@ class EmailClient:
                     message_id_str = message_id.decode("utf-8")
 
                     # Fetch the email using UID - try different formats for compatibility
+                    # Also fetch FLAGS to get read/unread status
                     data = None
+                    flags_data = None
                     fetch_formats = ["RFC822", "BODY[]", "BODY.PEEK[]", "(BODY.PEEK[])"]
+
+                    # First fetch the flags separately
+                    try:
+                        _, flags_response = await imap.uid("fetch", message_id_str, "FLAGS")
+                        if flags_response and len(flags_response) > 0:
+                            # Parse flags from response like: b'71998 (UID 71998 FLAGS (\\Seen))'
+                            for item in flags_response:
+                                if isinstance(item, bytes) and b"FLAGS" in item:
+                                    flags_str = item.decode("utf-8")
+                                    # Extract flags between parentheses after FLAGS
+                                    import re
+                                    flags_match = re.search(r'FLAGS \(([^)]*)\)', flags_str)
+                                    if flags_match:
+                                        flags_data = flags_match.group(1).split()
+                                    break
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch flags: {e}")
+                        flags_data = []
 
                     for fetch_format in fetch_formats:
                         try:
@@ -194,7 +217,7 @@ class EmailClient:
 
                     if raw_email:
                         try:
-                            parsed_email = self._parse_email_data(raw_email, message_id_str)
+                            parsed_email = self._parse_email_data(raw_email, message_id_str, flags_data)
                             yield parsed_email
                         except Exception as e:
                             # Log error but continue with other emails
@@ -219,6 +242,8 @@ class EmailClient:
         text: str | None = None,
         from_address: str | None = None,
         to_address: str | None = None,
+        unread_only: bool = False,
+        flagged_only: bool = False,
     ):
         search_criteria = []
         if before:
@@ -235,6 +260,10 @@ class EmailClient:
             search_criteria.extend(["FROM", from_address])
         if to_address:
             search_criteria.extend(["TO", to_address])
+        if unread_only:
+            search_criteria.append("UNSEEN")
+        if flagged_only:
+            search_criteria.append("FLAGGED")
 
         # If no specific criteria, search for ALL
         if not search_criteria:
@@ -251,6 +280,8 @@ class EmailClient:
         text: str | None = None,
         from_address: str | None = None,
         to_address: str | None = None,
+        unread_only: bool = False,
+        flagged_only: bool = False,
     ) -> int:
         imap = self.imap_class(self.email_server.host, self.email_server.port)
         try:
@@ -261,7 +292,7 @@ class EmailClient:
             # Login and select inbox
             await imap.login(self.email_server.user_name, self.email_server.password)
             await imap.select("INBOX")
-            search_criteria = self._build_search_criteria(before, since, subject, body, text, from_address, to_address)
+            search_criteria = self._build_search_criteria(before, since, subject, body, text, from_address, to_address, unread_only, flagged_only)
             logger.info(f"Count: Search criteria: {search_criteria}")
             # Search for messages and count them - use UID SEARCH for consistency
             _, messages = await imap.uid_search(*search_criteria)
@@ -282,7 +313,8 @@ class EmailClient:
             await imap.login(self.email_server.user_name, self.email_server.password)
 
             # List folders matching pattern
-            _, folders = await imap.list(pattern=pattern)
+            # list() expects reference_name and mailbox_pattern
+            _, folders = await imap.list('""', pattern)
             folder_info = []
 
             for folder in folders:
@@ -315,7 +347,7 @@ class EmailClient:
             await imap.login(self.email_server.user_name, self.email_server.password)
 
             # Check if folder exists
-            _, existing = await imap.list(pattern=folder_name)
+            _, existing = await imap.list('""', folder_name)
             if existing and len(existing) > 0:
                 return True
 

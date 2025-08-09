@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "email-server": {
+      "command": "uv",
+      "args": ["run", "mcp-email-server", "stdio"],
+      "cwd": "/home/shannon/mcp-email-server"
+    }
+  }
+}

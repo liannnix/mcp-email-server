@@ -11,9 +11,14 @@ class EmailData(BaseModel):
     body: str
     date: datetime
     attachments: list[str]
+    flags: list[str]
+    is_read: bool
+    is_flagged: bool
+    is_answered: bool
 
     @classmethod
     def from_email(cls, email: dict[str, Any]):
+        flags = email.get("flags", [])
         return cls(
             uid=email["uid"],
             subject=email["subject"],
@@ -21,6 +26,10 @@ class EmailData(BaseModel):
             body=email["body"],
             date=email["date"],
             attachments=email["attachments"],
+            flags=flags,
+            is_read="\\Seen" in flags,
+            is_flagged="\\Flagged" in flags,
+            is_answered="\\Answered" in flags,
         )
 
 

@@ -13,6 +13,10 @@ class TestEmailData:
             body="Test Body",
             date=datetime.now(),
             attachments=["file1.txt", "file2.pdf"],
+            flags=["\\Seen", "\\Flagged"],
+            is_read=True,
+            is_flagged=True,
+            is_answered=False,
         )
 
         assert email_data.uid == "123456"
@@ -21,6 +25,10 @@ class TestEmailData:
         assert email_data.body == "Test Body"
         assert isinstance(email_data.date, datetime)
         assert email_data.attachments == ["file1.txt", "file2.pdf"]
+        assert email_data.flags == ["\\Seen", "\\Flagged"]
+        assert email_data.is_read is True
+        assert email_data.is_flagged is True
+        assert email_data.is_answered is False
 
     def test_from_email(self):
         """Test from_email class method."""
@@ -32,6 +40,7 @@ class TestEmailData:
             "body": "Test Body",
             "date": now,
             "attachments": ["file1.txt", "file2.pdf"],
+            "flags": [],
         }
 
         email_data = EmailData.from_email(email_dict)
@@ -42,6 +51,9 @@ class TestEmailData:
         assert email_data.body == "Test Body"
         assert email_data.date == now
         assert email_data.attachments == ["file1.txt", "file2.pdf"]
+        assert email_data.flags == []
+        assert email_data.is_read is False
+        assert email_data.is_flagged is False
 
 
 class TestEmailPageResponse:
@@ -55,6 +67,10 @@ class TestEmailPageResponse:
             body="Test Body",
             date=now,
             attachments=[],
+            flags=[],
+            is_read=False,
+            is_flagged=False,
+            is_answered=False,
         )
 
         response = EmailPageResponse(
