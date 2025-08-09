@@ -471,13 +471,15 @@ class ClassicEmailHandler(EmailHandler):
         from_address: str | None = None,
         to_address: str | None = None,
         order: str = "desc",
+        unread_only: bool = False,
+        flagged_only: bool = False,
     ) -> EmailPageResponse:
         emails = []
         async for email_data in self.incoming_client.get_emails_stream(
-            page, page_size, before, since, subject, body, text, from_address, to_address, order
+            page, page_size, before, since, subject, body, text, from_address, to_address, order, unread_only, flagged_only
         ):
             emails.append(EmailData.from_email(email_data))
-        total = await self.incoming_client.get_email_count(before, since, subject, body, text, from_address, to_address)
+        total = await self.incoming_client.get_email_count(before, since, subject, body, text, from_address, to_address, unread_only, flagged_only)
         return EmailPageResponse(
             page=page,
             page_size=page_size,
