@@ -1,4 +1,5 @@
 import email.utils
+import re
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from email.mime.text import MIMEText
@@ -25,7 +26,7 @@ class EmailClient:
         self.smtp_use_tls = self.email_server.use_ssl
         self.smtp_start_tls = self.email_server.start_ssl
 
-    def _parse_email_data(self, raw_email: bytes) -> dict[str, Any]:  # noqa: C901
+    def _parse_email_data(self, raw_email: bytes, uid: str) -> dict[str, Any]:  # noqa: C901
         """Parse raw email data into a structured dictionary."""
         parser = BytesParser(policy=default)
         email_message = parser.parsebytes(raw_email)
@@ -76,6 +77,7 @@ class EmailClient:
                     body = payload.decode("utf-8", errors="replace")
 
         return {
+            "uid": uid,
             "subject": subject,
             "from": sender,
             "body": body,
@@ -192,7 +194,7 @@ class EmailClient:
 
                     if raw_email:
                         try:
-                            parsed_email = self._parse_email_data(raw_email)
+                            parsed_email = self._parse_email_data(raw_email, message_id_str)
                             yield parsed_email
                         except Exception as e:
                             # Log error but continue with other emails
@@ -266,6 +268,118 @@ class EmailClient:
             return len(messages[0].split())
         finally:
             # Ensure we logout properly
+            try:
+                await imap.logout()
+            except Exception as e:
+                logger.info(f"Error during logout: {e}")
+
+    async def list_folders(self, pattern: str = "*") -> list[dict[str, Any]]:
+        """List all IMAP folders with details."""
+        imap = self.imap_class(self.email_server.host, self.email_server.port)
+        try:
+            await imap._client_task
+            await imap.wait_hello_from_server()
+            await imap.login(self.email_server.user_name, self.email_server.password)
+
+            # List folders matching pattern
+            _, folders = await imap.list(pattern=pattern)
+            folder_info = []
+
+            for folder in folders:
+                if isinstance(folder, bytes):
+                    folder_str = folder.decode('utf-8')
+                    # Parse IMAP LIST response: (\Flags) "delimiter" "folder name"
+                    match = re.match(r'\(([^)]*)\)\s+"([^"]+)"\s+"([^"]+)"', folder_str)
+                    if match:
+                        flags, delimiter, name = match.groups()
+                        folder_info.append({
+                            "name": name,
+                            "delimiter": delimiter,
+                            "flags": flags.split() if flags else [],
+                            "can_select": "\\Noselect" not in flags
+                        })
+
+            return folder_info
+        finally:
+            try:
+                await imap.logout()
+            except Exception as e:
+                logger.info(f"Error during logout: {e}")
+
+    async def create_folder_if_needed(self, folder_name: str) -> bool:
+        """Create a folder if it doesn't exist."""
+        imap = self.imap_class(self.email_server.host, self.email_server.port)
+        try:
+            await imap._client_task
+            await imap.wait_hello_from_server()
+            await imap.login(self.email_server.user_name, self.email_server.password)
+
+            # Check if folder exists
+            _, existing = await imap.list(pattern=folder_name)
+            if existing and len(existing) > 0:
+                return True
+
+            # Create folder
+            await imap.create(folder_name)
+            logger.info(f"Created folder: {folder_name}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error creating folder {folder_name}: {e}")
+            return False
+        finally:
+            try:
+                await imap.logout()
+            except Exception as e:
+                logger.info(f"Error during logout: {e}")
+
+    async def move_to_folder(self, uid: str, target_folder: str,
+                            create_if_missing: bool = True) -> bool:
+        """Move email to specified folder."""
+        imap = self.imap_class(self.email_server.host, self.email_server.port)
+        try:
+            await imap._client_task
+            await imap.wait_hello_from_server()
+            await imap.login(self.email_server.user_name, self.email_server.password)
+            await imap.select("INBOX")  # Or current folder
+
+            # Ensure target folder exists
+            if create_if_missing:
+                folder_created = await self.create_folder_if_needed(target_folder)
+                if not folder_created:
+                    logger.error(f"Failed to create folder: {target_folder}")
+                    return False
+
+            # Try MOVE command first (RFC 6851)
+            try:
+                await imap.uid("move", uid, target_folder)
+                logger.info(f"Moved email {uid} to {target_folder} using MOVE")
+                return True
+            except Exception as move_error:
+                logger.debug(f"MOVE not supported: {move_error}")
+
+                # Fallback to COPY + DELETE
+                try:
+                    # Copy to target folder
+                    await imap.uid("copy", uid, target_folder)
+
+                    # Mark as deleted in source
+                    await imap.uid("store", uid, "+FLAGS", "\\Deleted")
+
+                    # Expunge to remove from source
+                    await imap.expunge()
+
+                    logger.info(f"Moved email {uid} to {target_folder} using COPY+DELETE")
+                    return True
+
+                except Exception as e:
+                    logger.error(f"Failed to move email: {e}")
+                    return False
+
+        except Exception as e:
+            logger.error(f"Error moving email {uid} to {target_folder}: {e}")
+            return False
+        finally:
             try:
                 await imap.logout()
             except Exception as e:
@@ -348,3 +462,9 @@ class ClassicEmailHandler(EmailHandler):
         self, recipients: list[str], subject: str, body: str, cc: list[str] | None = None, bcc: list[str] | None = None
     ) -> None:
         await self.outgoing_client.send_email(recipients, subject, body, cc, bcc)
+
+    async def list_folders(self, pattern: str = "*") -> list[dict[str, Any]]:
+        return await self.incoming_client.list_folders(pattern)
+
+    async def move_to_folder(self, uid: str, target_folder: str, create_if_missing: bool = True) -> bool:
+        return await self.incoming_client.move_to_folder(uid, target_folder, create_if_missing)

@@ -7,6 +7,7 @@ class TestEmailData:
     def test_init(self):
         """Test initialization with valid data."""
         email_data = EmailData(
+            uid="123456",
             subject="Test Subject",
             sender="test@example.com",
             body="Test Body",
@@ -14,6 +15,7 @@ class TestEmailData:
             attachments=["file1.txt", "file2.pdf"],
         )
 
+        assert email_data.uid == "123456"
         assert email_data.subject == "Test Subject"
         assert email_data.sender == "test@example.com"
         assert email_data.body == "Test Body"
@@ -24,6 +26,7 @@ class TestEmailData:
         """Test from_email class method."""
         now = datetime.now()
         email_dict = {
+            "uid": "789012",
             "subject": "Test Subject",
             "from": "test@example.com",
             "body": "Test Body",
@@ -33,6 +36,7 @@ class TestEmailData:
 
         email_data = EmailData.from_email(email_dict)
 
+        assert email_data.uid == "789012"
         assert email_data.subject == "Test Subject"
         assert email_data.sender == "test@example.com"
         assert email_data.body == "Test Body"
@@ -45,6 +49,7 @@ class TestEmailPageResponse:
         """Test initialization with valid data."""
         now = datetime.now()
         email_data = EmailData(
+            uid="345678",
             subject="Test Subject",
             sender="test@example.com",
             body="Test Body",

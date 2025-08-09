@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 
 class EmailData(BaseModel):
+    uid: str
     subject: str
     sender: str
     body: str
@@ -14,6 +15,7 @@ class EmailData(BaseModel):
     @classmethod
     def from_email(cls, email: dict[str, Any]):
         return cls(
+            uid=email["uid"],
             subject=email["subject"],
             sender=email["from"],
             body=email["body"],

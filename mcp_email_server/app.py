@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
@@ -100,3 +100,51 @@ async def send_email(
     handler = dispatch_handler(account_name)
     await handler.send_email(recipients, subject, body, cc, bcc)
     return
+
+
+@mcp.tool(description="List all available email folders/labels in the account.")
+async def list_email_folders(
+    account_name: Annotated[str, Field(description="The name of the email account.")],
+    pattern: Annotated[str, Field(description="Pattern to filter folders (default: '*' for all)")] = "*",
+) -> list[dict[str, Any]]:
+    handler = dispatch_handler(account_name)
+    return await handler.list_folders(pattern)
+
+
+@mcp.tool(description="Move an email to a specific folder. Creates folder if it doesn't exist.")
+async def move_email_to_folder(
+    account_name: Annotated[str, Field(description="The name of the email account.")],
+    uid: Annotated[str, Field(description="The UID of the email to move.")],
+    target_folder: Annotated[str, Field(description="The target folder name (e.g., 'Archive', 'Trash', 'Important').")],
+    create_if_missing: Annotated[bool, Field(description="Create folder if it doesn't exist (default: true)")] = True,
+) -> dict[str, bool]:
+    handler = dispatch_handler(account_name)
+    success = await handler.move_to_folder(uid, target_folder, create_if_missing)
+    return {"success": success}
+
+
+@mcp.tool(description="Move multiple emails to a specific folder.")
+async def move_emails_to_folder(
+    account_name: Annotated[str, Field(description="The name of the email account.")],
+    uids: Annotated[list[str], Field(description="List of email UIDs to move.")],
+    target_folder: Annotated[str, Field(description="The target folder name.")],
+    create_if_missing: Annotated[bool, Field(description="Create folder if it doesn't exist")] = True,
+) -> dict[str, Any]:
+    handler = dispatch_handler(account_name)
+    results = {}
+
+    # Ensure folder exists once if needed by attempting to move to it with create_if_missing=True
+    # for the first email, then False for the rest
+
+    for i, uid in enumerate(uids):
+        # Create folder on first email if needed
+        create_folder = create_if_missing if i == 0 else False
+        results[uid] = await handler.move_to_folder(uid, target_folder, create_folder)
+
+    successful = sum(results.values())
+    return {
+        "results": results,
+        "total_moved": successful,
+        "failed": len(uids) - successful,
+        "target_folder": target_folder
+    }
