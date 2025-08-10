@@ -128,6 +128,29 @@ class EmailClient:
         
         return raw_email, flags_data
 
+    async def get_single_email(self, uid: str, format: str = "html", truncate_body: int | None = None, imap=None) -> dict[str, Any] | None:
+        """Get a single email by UID - unified method used by both streaming and direct retrieval"""
+        
+        async def _fetch_and_parse(imap_conn):
+            raw_email, flags_data = await self._fetch_email_data(imap_conn, uid, by_uid=True, include_flags=True)
+            
+            if raw_email:
+                try:
+                    return self._parse_email_data(raw_email, uid, flags_data, format, truncate_body)
+                except Exception as e:
+                    logger.error(f"Error parsing email {uid}: {e}")
+                    return None
+            else:
+                logger.error(f"No email content found for UID {uid}")
+                return None
+        
+        # Use provided IMAP connection or create a new one
+        if imap is not None:
+            return await _fetch_and_parse(imap)
+        else:
+            async with self.imap_connection() as imap:
+                return await _fetch_and_parse(imap)
+
     def _parse_email_data(self, raw_email: bytes, uid: str, flags: list[str] | None = None, format: str = "html", truncate_body: int | None = None) -> dict[str, Any]:  # noqa: C901
         """Parse raw email data into a structured dictionary with format conversion."""
         parser = BytesParser(policy=default)
@@ -262,26 +285,22 @@ class EmailClient:
             if order == "desc":
                 message_ids.reverse()
 
-            # Fetch each message
+            # Fetch each message using unified single email method
             for _, message_id in enumerate(message_ids[start:end]):
                 try:
                     # Convert message_id from bytes to string
                     message_id_str = message_id.decode("utf-8")
 
-                    # Fetch email using unified method
-                    raw_email, flags_data = await self._fetch_email_data(imap, message_id_str, by_uid=True, include_flags=True)
-
-                    if raw_email:
-                        try:
-                            parsed_email = self._parse_email_data(raw_email, message_id_str, flags_data, format, truncate_body)
-                            yield parsed_email
-                        except Exception as e:
-                            # Log error but continue with other emails
-                            logger.error(f"Error parsing email: {e!s}")
+                    # Use unified get_single_email method with shared IMAP connection
+                    email_data = await self.get_single_email(message_id_str, format, truncate_body, imap=imap)
+                    
+                    if email_data:
+                        yield email_data
                     else:
-                        logger.error(f"Could not find email data in response for message ID: {message_id_str}")
+                        logger.error(f"Failed to retrieve email with UID {message_id_str}")
+                        
                 except Exception as e:
-                    logger.error(f"Error fetching message {message_id}: {e!s}")
+                    logger.error(f"Error processing email {message_id}: {e!s}")
 
     @staticmethod
     def _build_search_criteria(
@@ -426,26 +445,7 @@ class EmailClient:
 
     async def get_email_by_uid(self, uid: str, format: str = "html") -> dict[str, Any] | None:
         """Get a single email by its UID without truncation."""
-        try:
-            async with self.imap_connection() as imap:
-                # Fetch email using unified method
-                raw_email, flags_data = await self._fetch_email_data(imap, uid, by_uid=True, include_flags=True)
-
-                if raw_email:
-                    try:
-                        # Parse email without truncation
-                        parsed_email = self._parse_email_data(raw_email, uid, flags_data, format, truncate_body=None)
-                        return parsed_email
-                    except Exception as e:
-                        logger.error(f"Error parsing email {uid}: {e}")
-                        return None
-                else:
-                    logger.error(f"No email content found for UID {uid}")
-                    return None
-
-        except Exception as e:
-            logger.error(f"Error retrieving email {uid}: {e}")
-            return None
+        return await self.get_single_email(uid, format, truncate_body=None)
 
     async def send_email(
         self, recipients: list[str], subject: str, body: str, cc: list[str] | None = None, bcc: list[str] | None = None
