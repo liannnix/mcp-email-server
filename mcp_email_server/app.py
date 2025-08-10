@@ -65,6 +65,14 @@ async def page_email(
     ] = "desc",
     unread_only: Annotated[bool, Field(default=False, description="Filter to show only unread emails.")] = False,
     flagged_only: Annotated[bool, Field(default=False, description="Filter to show only flagged emails.")] = False,
+    format: Annotated[
+        Literal["html", "markdown"],
+        Field(default="html", description="Output format: 'html' returns original content, 'markdown' converts HTML to markdown or returns plain text as-is."),
+    ] = "html",
+    truncate_body: Annotated[
+        int | None,
+        Field(default=None, description="Maximum number of characters for email body content. If specified, body content longer than this will be truncated."),
+    ] = None,
 ) -> EmailPageResponse:
     handler = dispatch_handler(account_name)
 
@@ -81,6 +89,8 @@ async def page_email(
         order=order,
         unread_only=unread_only,
         flagged_only=flagged_only,
+        format=format,
+        truncate_body=truncate_body,
     )
 
 
@@ -156,3 +166,60 @@ async def move_emails_to_folder(
         "failed": len(uids) - successful,
         "target_folder": target_folder
     }
+
+
+@mcp.tool(description="Save a complete email to a file without truncation.")
+async def save_email_to_file(
+    account_name: Annotated[str, Field(description="The name of the email account.")],
+    uid: Annotated[str | int, Field(description="The UID of the email to save.")],
+    file_path: Annotated[str, Field(description="The file path where to save the email content.")],
+    format: Annotated[
+        Literal["html", "markdown"],
+        Field(default="markdown", description="Output format: 'html' returns original content, 'markdown' converts HTML to markdown or returns plain text as-is."),
+    ] = "markdown",
+    include_headers: Annotated[bool, Field(default=True, description="Include email headers (subject, from, date, etc.) in the saved file.")] = True,
+) -> dict[str, Any]:
+    handler = dispatch_handler(account_name)
+    
+    # Get the single email by UID without truncation
+    uid_str = str(uid)
+    email_data = await handler.get_email_by_uid(uid_str, format=format)
+    
+    if not email_data:
+        return {"success": False, "error": f"Email with UID {uid_str} not found"}
+    
+    # Build the content to save
+    content_parts = []
+    
+    if include_headers:
+        content_parts.extend([
+            f"Subject: {email_data.get('subject', 'N/A')}",
+            f"From: {email_data.get('from', 'N/A')}",
+            f"Date: {email_data.get('date', 'N/A')}",
+            f"UID: {email_data.get('uid', 'N/A')}",
+            f"Body Format: {email_data.get('body_format', 'unknown')}",
+            "",  # Empty line separator
+        ])
+    
+    # Add the body content
+    body = email_data.get('body', '')
+    content_parts.append(body)
+    
+    # Join all parts
+    full_content = '\n'.join(content_parts)
+    
+    try:
+        # Write to file
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(full_content)
+        
+        return {
+            "success": True,
+            "file_path": file_path,
+            "content_length": len(full_content),
+            "body_length": len(body),
+            "format": format,
+            "includes_headers": include_headers
+        }
+    except Exception as e:
+        return {"success": False, "error": f"Failed to write file: {str(e)}"}

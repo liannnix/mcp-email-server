@@ -22,6 +22,8 @@ class EmailHandler(abc.ABC):
         order: str = "desc",
         unread_only: bool = False,
         flagged_only: bool = False,
+        format: str = "html",
+        truncate_body: int | None = None,
     ) -> "EmailPageResponse":
         """
         Get emails
@@ -45,4 +47,10 @@ class EmailHandler(abc.ABC):
     async def move_to_folder(self, uid: str, target_folder: str, create_if_missing: bool = True) -> bool:
         """
         Move email to specified folder
+        """
+
+    @abc.abstractmethod
+    async def get_email_by_uid(self, uid: str, format: str = "html") -> dict[str, Any] | None:
+        """
+        Get a single email by its UID without truncation
         """

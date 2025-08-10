@@ -1,5 +1,7 @@
 import email.utils
 import re
+import email
+import logging
 from collections.abc import AsyncGenerator
 from datetime import datetime
 from email.mime.text import MIMEText
@@ -13,6 +15,7 @@ import aiosmtplib
 from mcp_email_server.config import EmailServer, EmailSettings
 from mcp_email_server.emails import EmailHandler
 from mcp_email_server.emails.models import EmailData, EmailPageResponse
+from mcp_email_server.utils.html_converter import determine_output_format
 from mcp_email_server.log import logger
 
 
@@ -26,8 +29,8 @@ class EmailClient:
         self.smtp_use_tls = self.email_server.use_ssl
         self.smtp_start_tls = self.email_server.start_ssl
 
-    def _parse_email_data(self, raw_email: bytes, uid: str, flags: list[str] | None = None) -> dict[str, Any]:  # noqa: C901
-        """Parse raw email data into a structured dictionary."""
+    def _parse_email_data(self, raw_email: bytes, uid: str, flags: list[str] | None = None, format: str = "html", truncate_body: int | None = None) -> dict[str, Any]:  # noqa: C901
+        """Parse raw email data into a structured dictionary with format conversion."""
         parser = BytesParser(policy=default)
         email_message = parser.parsebytes(raw_email)
 
@@ -43,13 +46,18 @@ class EmailClient:
         except Exception:
             date = datetime.now()
 
-        # Get body content
+        # Get body content and determine format
         body = ""
+        content_type = ""
         attachments = []
 
         if email_message.is_multipart():
+            # For multipart emails, prioritize HTML content for full information
+            html_part = ""
+            text_part = ""
+            
             for part in email_message.walk():
-                content_type = part.get_content_type()
+                part_content_type = part.get_content_type()
                 content_disposition = str(part.get("Content-Disposition", ""))
 
                 # Handle attachments
@@ -57,17 +65,41 @@ class EmailClient:
                     filename = part.get_filename()
                     if filename:
                         attachments.append(filename)
-                # Handle text parts
-                elif content_type == "text/plain":
+                # Handle HTML parts
+                elif part_content_type == "text/html":
                     body_part = part.get_payload(decode=True)
                     if body_part:
                         charset = part.get_content_charset("utf-8")
                         try:
-                            body += body_part.decode(charset)
+                            html_part = body_part.decode(charset)
                         except UnicodeDecodeError:
-                            body += body_part.decode("utf-8", errors="replace")
+                            html_part = body_part.decode("utf-8", errors="replace")
+                # Handle text parts
+                elif part_content_type == "text/plain":
+                    body_part = part.get_payload(decode=True)
+                    if body_part:
+                        charset = part.get_content_charset("utf-8")
+                        try:
+                            text_part = body_part.decode(charset)
+                        except UnicodeDecodeError:
+                            text_part = body_part.decode("utf-8", errors="replace")
+            
+            # Choose content based on what's available
+            if html_part:
+                body = html_part
+                content_type = "text/html"
+            elif text_part:
+                body = text_part
+                content_type = "text/plain"
+            else:
+                body = ""
+                content_type = "text/plain"
+            
+            # Store content type as multipart for format processing
+            content_type = "multipart/alternative"
         else:
-            # Handle plain text emails
+            # Handle single-part emails
+            content_type = email_message.get_content_type() or "text/plain"
             payload = email_message.get_payload(decode=True)
             if payload:
                 charset = email_message.get_content_charset("utf-8")
@@ -76,11 +108,19 @@ class EmailClient:
                 except UnicodeDecodeError:
                     body = payload.decode("utf-8", errors="replace")
 
+        # Apply format conversion
+        processed_body, body_format = determine_output_format(body, content_type, email_message, format)
+        
+        # Apply truncation if specified
+        if truncate_body is not None and len(processed_body) > truncate_body:
+            processed_body = processed_body[:truncate_body] + "... [truncated]"
+
         return {
             "uid": uid,
             "subject": subject,
             "from": sender,
-            "body": body,
+            "body": processed_body,
+            "body_format": body_format,
             "date": date,
             "attachments": attachments,
             "flags": flags or [],
@@ -100,6 +140,8 @@ class EmailClient:
         order: str = "desc",
         unread_only: bool = False,
         flagged_only: bool = False,
+        format: str = "html",
+        truncate_body: int | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         imap = self.imap_class(self.email_server.host, self.email_server.port)
         try:
@@ -144,7 +186,8 @@ class EmailClient:
                     # Also fetch FLAGS to get read/unread status
                     data = None
                     flags_data = None
-                    fetch_formats = ["RFC822", "BODY[]", "BODY.PEEK[]", "(BODY.PEEK[])"]
+                    # Use BODY.PEEK first to avoid marking emails as read
+                    fetch_formats = ["BODY.PEEK[]", "(BODY.PEEK[])", "BODY[]", "RFC822"]
 
                     # First fetch the flags separately
                     try:
@@ -217,7 +260,7 @@ class EmailClient:
 
                     if raw_email:
                         try:
-                            parsed_email = self._parse_email_data(raw_email, message_id_str, flags_data)
+                            parsed_email = self._parse_email_data(raw_email, message_id_str, flags_data, format, truncate_body)
                             yield parsed_email
                         except Exception as e:
                             # Log error but continue with other emails
@@ -417,6 +460,103 @@ class EmailClient:
             except Exception as e:
                 logger.info(f"Error during logout: {e}")
 
+    async def get_email_by_uid(self, uid: str, format: str = "html") -> dict[str, Any] | None:
+        """Get a single email by its UID without truncation."""
+        imap = self.imap_class(self.email_server.host, self.email_server.port)
+        try:
+            await imap._client_task
+            await imap.wait_hello_from_server()
+            await imap.login(self.email_server.user_name, self.email_server.password)
+            await imap.select("INBOX")
+
+            # Try multiple fetch formats to get the email content
+            fetch_formats = [
+                "(BODY.PEEK[] FLAGS)",
+                "(RFC822.PEEK FLAGS)",
+                "(BODY[] FLAGS)",
+                "(RFC822 FLAGS)"
+            ]
+            
+            data = None
+            for fetch_format in fetch_formats:
+                try:
+                    search_response = await imap.uid("fetch", uid, fetch_format)
+                    if search_response and search_response.result == 'OK' and search_response.lines:
+                        data = search_response.lines
+                        # Check if we actually got email content
+                        has_content = False
+                        for item in data:
+                            if (
+                                isinstance(item, bytes)
+                                and b"FETCH (" in item
+                                and b"RFC822" not in item
+                                and b"BODY" not in item
+                            ):
+                                # This is just metadata, not actual content
+                                continue
+                            elif isinstance(item, bytes | bytearray) and len(item) > 100:
+                                # This looks like email content
+                                has_content = True
+                                break
+                        if has_content:
+                            break
+                        else:
+                            data = None  # Try next format
+                except Exception as e:
+                    logger.debug(f"Fetch format {fetch_format} failed: {e}")
+                    continue
+
+            if not data:
+                logger.error(f"No email data found for UID {uid}")
+                return None
+
+            # Extract flags
+            flags_data = []
+            for item in data:
+                if isinstance(item, str) and "FLAGS" in item:
+                    flags_match = re.search(r'FLAGS \(([^)]*)\)', item)
+                    if flags_match:
+                        flags_str = flags_match.group(1)
+                        flags_data = [flag.strip().replace('\\', '') for flag in flags_str.split() if flag.strip()]
+                    break
+
+            # Find the email data in the response
+            raw_email = None
+            # The email content is typically at index 1 as a bytearray
+            if len(data) > 1 and isinstance(data[1], bytearray):
+                raw_email = bytes(data[1])
+            else:
+                # Search through all items for email content
+                for item in data:
+                    if isinstance(item, bytes | bytearray) and len(item) > 100:
+                        # Skip IMAP protocol responses
+                        if isinstance(item, bytes) and b"FETCH" in item:
+                            continue
+                        # This is likely the email content
+                        raw_email = bytes(item) if isinstance(item, bytearray) else item
+                        break
+
+            if raw_email:
+                try:
+                    # Parse email without truncation
+                    parsed_email = self._parse_email_data(raw_email, uid, flags_data, format, truncate_body=None)
+                    return parsed_email
+                except Exception as e:
+                    logger.error(f"Error parsing email {uid}: {e}")
+                    return None
+            else:
+                logger.error(f"No email content found for UID {uid}")
+                return None
+
+        except Exception as e:
+            logger.error(f"Error retrieving email {uid}: {e}")
+            return None
+        finally:
+            try:
+                await imap.logout()
+            except Exception as e:
+                logger.info(f"Error during logout: {e}")
+
     async def send_email(
         self, recipients: list[str], subject: str, body: str, cc: list[str] | None = None, bcc: list[str] | None = None
     ):
@@ -473,10 +613,12 @@ class ClassicEmailHandler(EmailHandler):
         order: str = "desc",
         unread_only: bool = False,
         flagged_only: bool = False,
+        format: str = "html",
+        truncate_body: int | None = None,
     ) -> EmailPageResponse:
         emails = []
         async for email_data in self.incoming_client.get_emails_stream(
-            page, page_size, before, since, subject, body, text, from_address, to_address, order, unread_only, flagged_only
+            page, page_size, before, since, subject, body, text, from_address, to_address, order, unread_only, flagged_only, format, truncate_body
         ):
             emails.append(EmailData.from_email(email_data))
         total = await self.incoming_client.get_email_count(before, since, subject, body, text, from_address, to_address, unread_only, flagged_only)
@@ -502,3 +644,6 @@ class ClassicEmailHandler(EmailHandler):
 
     async def move_to_folder(self, uid: str, target_folder: str, create_if_missing: bool = True) -> bool:
         return await self.incoming_client.move_to_folder(uid, target_folder, create_if_missing)
+
+    async def get_email_by_uid(self, uid: str, format: str = "html") -> dict[str, Any] | None:
+        return await self.incoming_client.get_email_by_uid(uid, format)

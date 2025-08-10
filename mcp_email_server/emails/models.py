@@ -9,6 +9,7 @@ class EmailData(BaseModel):
     subject: str
     sender: str
     body: str
+    body_format: str = "html"  # "html", "markdown", or "text"
     date: datetime
     attachments: list[str]
     flags: list[str]
@@ -24,6 +25,7 @@ class EmailData(BaseModel):
             subject=email["subject"],
             sender=email["from"],
             body=email["body"],
+            body_format=email.get("body_format", "html"),
             date=email["date"],
             attachments=email["attachments"],
             flags=flags,
