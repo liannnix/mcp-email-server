@@ -3,6 +3,7 @@ import re
 import email
 import logging
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import datetime
 from email.mime.text import MIMEText
 from email.parser import BytesParser
@@ -28,6 +29,36 @@ class EmailClient:
 
         self.smtp_use_tls = self.email_server.use_ssl
         self.smtp_start_tls = self.email_server.start_ssl
+
+    @asynccontextmanager
+    async def imap_connection(self, select_folder: str = "INBOX"):
+        """Reusable IMAP connection context manager"""
+        imap = self.imap_class(self.email_server.host, self.email_server.port)
+        try:
+            # Establish connection
+            await imap._client_task
+            await imap.wait_hello_from_server()
+            
+            # Login
+            await imap.login(self.email_server.user_name, self.email_server.password)
+            
+            # Optional IMAP ID for compatibility
+            try:
+                await imap.id(name="mcp-email-server", version="1.0.0")
+            except Exception as e:
+                logger.warning(f"IMAP ID command failed: {e!s}")
+            
+            # Select folder if specified
+            if select_folder:
+                await imap.select(select_folder)
+                
+            yield imap
+            
+        finally:
+            try:
+                await imap.logout()
+            except Exception as e:
+                logger.info(f"Error during logout: {e}")
 
     def _parse_email_data(self, raw_email: bytes, uid: str, flags: list[str] | None = None, format: str = "html", truncate_body: int | None = None) -> dict[str, Any]:  # noqa: C901
         """Parse raw email data into a structured dictionary with format conversion."""
@@ -143,20 +174,7 @@ class EmailClient:
         format: str = "html",
         truncate_body: int | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        imap = self.imap_class(self.email_server.host, self.email_server.port)
-        try:
-            # Wait for the connection to be established
-            await imap._client_task
-            await imap.wait_hello_from_server()
-
-            # Login and select inbox
-            await imap.login(self.email_server.user_name, self.email_server.password)
-            try:
-                await imap.id(name="mcp-email-server", version="1.0.0")
-            except Exception as e:
-                logger.warning(f"IMAP ID command failed: {e!s}")
-            await imap.select("INBOX")
-
+        async with self.imap_connection() as imap:
             search_criteria = self._build_search_criteria(before, since, subject, body, text, from_address, to_address, unread_only, flagged_only)
             logger.info(f"Get: Search criteria: {search_criteria}")
 
@@ -269,12 +287,6 @@ class EmailClient:
                         logger.error(f"Could not find email data in response for message ID: {message_id_str}")
                 except Exception as e:
                     logger.error(f"Error fetching message {message_id}: {e!s}")
-        finally:
-            # Ensure we logout properly
-            try:
-                await imap.logout()
-            except Exception as e:
-                logger.info(f"Error during logout: {e}")
 
     @staticmethod
     def _build_search_criteria(
@@ -326,35 +338,16 @@ class EmailClient:
         unread_only: bool = False,
         flagged_only: bool = False,
     ) -> int:
-        imap = self.imap_class(self.email_server.host, self.email_server.port)
-        try:
-            # Wait for the connection to be established
-            await imap._client_task
-            await imap.wait_hello_from_server()
-
-            # Login and select inbox
-            await imap.login(self.email_server.user_name, self.email_server.password)
-            await imap.select("INBOX")
+        async with self.imap_connection() as imap:
             search_criteria = self._build_search_criteria(before, since, subject, body, text, from_address, to_address, unread_only, flagged_only)
             logger.info(f"Count: Search criteria: {search_criteria}")
             # Search for messages and count them - use UID SEARCH for consistency
             _, messages = await imap.uid_search(*search_criteria)
             return len(messages[0].split())
-        finally:
-            # Ensure we logout properly
-            try:
-                await imap.logout()
-            except Exception as e:
-                logger.info(f"Error during logout: {e}")
 
     async def list_folders(self, pattern: str = "*") -> list[dict[str, Any]]:
         """List all IMAP folders with details."""
-        imap = self.imap_class(self.email_server.host, self.email_server.port)
-        try:
-            await imap._client_task
-            await imap.wait_hello_from_server()
-            await imap.login(self.email_server.user_name, self.email_server.password)
-
+        async with self.imap_connection(select_folder=None) as imap:
             # List folders matching pattern
             # list() expects reference_name and mailbox_pattern
             _, folders = await imap.list('""', pattern)
@@ -375,187 +368,153 @@ class EmailClient:
                         })
 
             return folder_info
-        finally:
-            try:
-                await imap.logout()
-            except Exception as e:
-                logger.info(f"Error during logout: {e}")
 
     async def create_folder_if_needed(self, folder_name: str) -> bool:
         """Create a folder if it doesn't exist."""
-        imap = self.imap_class(self.email_server.host, self.email_server.port)
         try:
-            await imap._client_task
-            await imap.wait_hello_from_server()
-            await imap.login(self.email_server.user_name, self.email_server.password)
+            async with self.imap_connection(select_folder=None) as imap:
+                # Check if folder exists
+                _, existing = await imap.list('""', folder_name)
+                if existing and len(existing) > 0:
+                    return True
 
-            # Check if folder exists
-            _, existing = await imap.list('""', folder_name)
-            if existing and len(existing) > 0:
+                # Create folder
+                await imap.create(folder_name)
+                logger.info(f"Created folder: {folder_name}")
                 return True
-
-            # Create folder
-            await imap.create(folder_name)
-            logger.info(f"Created folder: {folder_name}")
-            return True
 
         except Exception as e:
             logger.error(f"Error creating folder {folder_name}: {e}")
             return False
-        finally:
-            try:
-                await imap.logout()
-            except Exception as e:
-                logger.info(f"Error during logout: {e}")
 
     async def move_to_folder(self, uid: str, target_folder: str,
                             create_if_missing: bool = True) -> bool:
         """Move email to specified folder."""
-        imap = self.imap_class(self.email_server.host, self.email_server.port)
         try:
-            await imap._client_task
-            await imap.wait_hello_from_server()
-            await imap.login(self.email_server.user_name, self.email_server.password)
-            await imap.select("INBOX")  # Or current folder
-
-            # Ensure target folder exists
+            # Ensure target folder exists (do this before opening IMAP connection)
             if create_if_missing:
                 folder_created = await self.create_folder_if_needed(target_folder)
                 if not folder_created:
                     logger.error(f"Failed to create folder: {target_folder}")
                     return False
 
-            # Try MOVE command first (RFC 6851)
-            try:
-                await imap.uid("move", uid, target_folder)
-                logger.info(f"Moved email {uid} to {target_folder} using MOVE")
-                return True
-            except Exception as move_error:
-                logger.debug(f"MOVE not supported: {move_error}")
-
-                # Fallback to COPY + DELETE
+            async with self.imap_connection() as imap:
+                # Try MOVE command first (RFC 6851)
                 try:
-                    # Copy to target folder
-                    await imap.uid("copy", uid, target_folder)
-
-                    # Mark as deleted in source
-                    await imap.uid("store", uid, "+FLAGS", "\\Deleted")
-
-                    # Expunge to remove from source
-                    await imap.expunge()
-
-                    logger.info(f"Moved email {uid} to {target_folder} using COPY+DELETE")
+                    await imap.uid("move", uid, target_folder)
+                    logger.info(f"Moved email {uid} to {target_folder} using MOVE")
                     return True
+                except Exception as move_error:
+                    logger.debug(f"MOVE not supported: {move_error}")
 
-                except Exception as e:
-                    logger.error(f"Failed to move email: {e}")
-                    return False
+                    # Fallback to COPY + DELETE
+                    try:
+                        # Copy to target folder
+                        await imap.uid("copy", uid, target_folder)
+
+                        # Mark as deleted in source
+                        await imap.uid("store", uid, "+FLAGS", "\\Deleted")
+
+                        # Expunge to remove from source
+                        await imap.expunge()
+
+                        logger.info(f"Moved email {uid} to {target_folder} using COPY+DELETE")
+                        return True
+
+                    except Exception as e:
+                        logger.error(f"Failed to move email: {e}")
+                        return False
 
         except Exception as e:
             logger.error(f"Error moving email {uid} to {target_folder}: {e}")
             return False
-        finally:
-            try:
-                await imap.logout()
-            except Exception as e:
-                logger.info(f"Error during logout: {e}")
 
     async def get_email_by_uid(self, uid: str, format: str = "html") -> dict[str, Any] | None:
         """Get a single email by its UID without truncation."""
-        imap = self.imap_class(self.email_server.host, self.email_server.port)
         try:
-            await imap._client_task
-            await imap.wait_hello_from_server()
-            await imap.login(self.email_server.user_name, self.email_server.password)
-            await imap.select("INBOX")
-
-            # Try multiple fetch formats to get the email content
-            fetch_formats = [
+            async with self.imap_connection() as imap:
+                # Try multiple fetch formats to get the email content
+                fetch_formats = [
                 "(BODY.PEEK[] FLAGS)",
                 "(RFC822.PEEK FLAGS)",
                 "(BODY[] FLAGS)",
                 "(RFC822 FLAGS)"
-            ]
-            
-            data = None
-            for fetch_format in fetch_formats:
-                try:
-                    search_response = await imap.uid("fetch", uid, fetch_format)
-                    if search_response and search_response.result == 'OK' and search_response.lines:
-                        data = search_response.lines
-                        # Check if we actually got email content
-                        has_content = False
-                        for item in data:
-                            if (
-                                isinstance(item, bytes)
-                                and b"FETCH (" in item
-                                and b"RFC822" not in item
-                                and b"BODY" not in item
-                            ):
-                                # This is just metadata, not actual content
-                                continue
-                            elif isinstance(item, bytes | bytearray) and len(item) > 100:
-                                # This looks like email content
-                                has_content = True
+                ]
+                
+                data = None
+                for fetch_format in fetch_formats:
+                    try:
+                        search_response = await imap.uid("fetch", uid, fetch_format)
+                        if search_response and search_response.result == 'OK' and search_response.lines:
+                            data = search_response.lines
+                            # Check if we actually got email content
+                            has_content = False
+                            for item in data:
+                                if (
+                                    isinstance(item, bytes)
+                                    and b"FETCH (" in item
+                                    and b"RFC822" not in item
+                                    and b"BODY" not in item
+                                ):
+                                    # This is just metadata, not actual content
+                                    continue
+                                elif isinstance(item, bytes | bytearray) and len(item) > 100:
+                                    # This looks like email content
+                                    has_content = True
+                                    break
+                            if has_content:
                                 break
-                        if has_content:
-                            break
-                        else:
-                            data = None  # Try next format
-                except Exception as e:
-                    logger.debug(f"Fetch format {fetch_format} failed: {e}")
-                    continue
+                            else:
+                                data = None  # Try next format
+                    except Exception as e:
+                        logger.debug(f"Fetch format {fetch_format} failed: {e}")
+                        continue
 
-            if not data:
-                logger.error(f"No email data found for UID {uid}")
-                return None
+                if not data:
+                    logger.error(f"No email data found for UID {uid}")
+                    return None
 
-            # Extract flags
-            flags_data = []
-            for item in data:
-                if isinstance(item, str) and "FLAGS" in item:
-                    flags_match = re.search(r'FLAGS \(([^)]*)\)', item)
-                    if flags_match:
-                        flags_str = flags_match.group(1)
-                        flags_data = [flag.strip().replace('\\', '') for flag in flags_str.split() if flag.strip()]
-                    break
-
-            # Find the email data in the response
-            raw_email = None
-            # The email content is typically at index 1 as a bytearray
-            if len(data) > 1 and isinstance(data[1], bytearray):
-                raw_email = bytes(data[1])
-            else:
-                # Search through all items for email content
+                # Extract flags
+                flags_data = []
                 for item in data:
-                    if isinstance(item, bytes | bytearray) and len(item) > 100:
-                        # Skip IMAP protocol responses
-                        if isinstance(item, bytes) and b"FETCH" in item:
-                            continue
-                        # This is likely the email content
-                        raw_email = bytes(item) if isinstance(item, bytearray) else item
+                    if isinstance(item, str) and "FLAGS" in item:
+                        flags_match = re.search(r'FLAGS \(([^)]*)\)', item)
+                        if flags_match:
+                            flags_str = flags_match.group(1)
+                            flags_data = [flag.strip().replace('\\', '') for flag in flags_str.split() if flag.strip()]
                         break
 
-            if raw_email:
-                try:
-                    # Parse email without truncation
-                    parsed_email = self._parse_email_data(raw_email, uid, flags_data, format, truncate_body=None)
-                    return parsed_email
-                except Exception as e:
-                    logger.error(f"Error parsing email {uid}: {e}")
+                # Find the email data in the response
+                raw_email = None
+                # The email content is typically at index 1 as a bytearray
+                if len(data) > 1 and isinstance(data[1], bytearray):
+                    raw_email = bytes(data[1])
+                else:
+                    # Search through all items for email content
+                    for item in data:
+                        if isinstance(item, bytes | bytearray) and len(item) > 100:
+                            # Skip IMAP protocol responses
+                            if isinstance(item, bytes) and b"FETCH" in item:
+                                continue
+                            # This is likely the email content
+                            raw_email = bytes(item) if isinstance(item, bytearray) else item
+                            break
+
+                if raw_email:
+                    try:
+                        # Parse email without truncation
+                        parsed_email = self._parse_email_data(raw_email, uid, flags_data, format, truncate_body=None)
+                        return parsed_email
+                    except Exception as e:
+                        logger.error(f"Error parsing email {uid}: {e}")
+                        return None
+                else:
+                    logger.error(f"No email content found for UID {uid}")
                     return None
-            else:
-                logger.error(f"No email content found for UID {uid}")
-                return None
 
         except Exception as e:
             logger.error(f"Error retrieving email {uid}: {e}")
             return None
-        finally:
-            try:
-                await imap.logout()
-            except Exception as e:
-                logger.info(f"Error during logout: {e}")
 
     async def send_email(
         self, recipients: list[str], subject: str, body: str, cc: list[str] | None = None, bcc: list[str] | None = None
