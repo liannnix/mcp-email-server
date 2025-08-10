@@ -60,6 +60,74 @@ class EmailClient:
             except Exception as e:
                 logger.info(f"Error during logout: {e}")
 
+    async def _fetch_email_data(self, imap, identifier: str, by_uid: bool = True, include_flags: bool = True) -> tuple[bytes | None, list[str]]:
+        """Unified email fetching with multiple format fallbacks"""
+        
+        fetch_cmd = imap.uid if by_uid else imap.fetch
+        
+        # Determine fetch formats based on needs
+        if include_flags:
+            fetch_formats = [
+                "(BODY.PEEK[] FLAGS)",
+                "(RFC822.PEEK FLAGS)", 
+                "(BODY[] FLAGS)",
+                "(RFC822 FLAGS)"
+            ]
+        else:
+            fetch_formats = [
+                "BODY.PEEK[]",
+                "(BODY.PEEK[])",
+                "BODY[]", 
+                "RFC822"
+            ]
+        
+        # Try each format until we get content
+        for fetch_format in fetch_formats:
+            try:
+                response = await fetch_cmd("fetch", identifier, fetch_format)
+                
+                if response and response.result == 'OK' and response.lines:
+                    raw_email, flags_data = self._extract_email_and_flags(response.lines)
+                    
+                    if raw_email and len(raw_email) > 100:  # Validate content
+                        return raw_email, flags_data
+                        
+            except Exception as e:
+                logger.debug(f"Fetch format {fetch_format} failed: {e}")
+                continue
+        
+        return None, []
+
+    def _extract_email_and_flags(self, response_lines) -> tuple[bytes | None, list[str]]:
+        """Extract email content and flags from IMAP response"""
+        raw_email = None
+        flags_data = []
+        
+        # Extract flags from response
+        for item in response_lines:
+            if isinstance(item, str) and "FLAGS" in item:
+                flags_match = re.search(r'FLAGS \(([^)]*)\)', item)
+                if flags_match:
+                    flags_str = flags_match.group(1)
+                    flags_data = [flag.strip().replace('\\', '') for flag in flags_str.split() if flag.strip()]
+                break
+        
+        # Find email content - try index 1 first (typical location)
+        if len(response_lines) > 1 and isinstance(response_lines[1], bytearray):
+            raw_email = bytes(response_lines[1])
+        else:
+            # Search through all items for email content
+            for item in response_lines:
+                if isinstance(item, (bytes, bytearray)) and len(item) > 100:
+                    # Skip IMAP protocol responses
+                    if isinstance(item, bytes) and b"FETCH" in item:
+                        continue
+                    # This is likely the email content
+                    raw_email = bytes(item) if isinstance(item, bytearray) else item
+                    break
+        
+        return raw_email, flags_data
+
     def _parse_email_data(self, raw_email: bytes, uid: str, flags: list[str] | None = None, format: str = "html", truncate_body: int | None = None) -> dict[str, Any]:  # noqa: C901
         """Parse raw email data into a structured dictionary with format conversion."""
         parser = BytesParser(policy=default)
@@ -200,81 +268,8 @@ class EmailClient:
                     # Convert message_id from bytes to string
                     message_id_str = message_id.decode("utf-8")
 
-                    # Fetch the email using UID - try different formats for compatibility
-                    # Also fetch FLAGS to get read/unread status
-                    data = None
-                    flags_data = None
-                    # Use BODY.PEEK first to avoid marking emails as read
-                    fetch_formats = ["BODY.PEEK[]", "(BODY.PEEK[])", "BODY[]", "RFC822"]
-
-                    # First fetch the flags separately
-                    try:
-                        _, flags_response = await imap.uid("fetch", message_id_str, "FLAGS")
-                        if flags_response and len(flags_response) > 0:
-                            # Parse flags from response like: b'71998 (UID 71998 FLAGS (\\Seen))'
-                            for item in flags_response:
-                                if isinstance(item, bytes) and b"FLAGS" in item:
-                                    flags_str = item.decode("utf-8")
-                                    # Extract flags between parentheses after FLAGS
-                                    import re
-                                    flags_match = re.search(r'FLAGS \(([^)]*)\)', flags_str)
-                                    if flags_match:
-                                        flags_data = flags_match.group(1).split()
-                                    break
-                    except Exception as e:
-                        logger.debug(f"Failed to fetch flags: {e}")
-                        flags_data = []
-
-                    for fetch_format in fetch_formats:
-                        try:
-                            _, data = await imap.uid("fetch", message_id_str, fetch_format)
-
-                            if data and len(data) > 0:
-                                # Check if we got actual email content or just metadata
-                                has_content = False
-                                for item in data:
-                                    if (
-                                        isinstance(item, bytes)
-                                        and b"FETCH (" in item
-                                        and b"RFC822" not in item
-                                        and b"BODY" not in item
-                                    ):
-                                        # This is just metadata (like 'FETCH (UID 71998)'), not actual content
-                                        continue
-                                    elif isinstance(item, bytes | bytearray) and len(item) > 100:
-                                        # This looks like email content
-                                        has_content = True
-                                        break
-
-                                if has_content:
-                                    break
-                                else:
-                                    data = None  # Try next format
-
-                        except Exception as e:
-                            logger.debug(f"Fetch format {fetch_format} failed: {e}")
-                            data = None
-
-                    if not data:
-                        logger.error(f"Failed to fetch UID {message_id_str} with any format")
-                        continue
-
-                    # Find the email data in the response
-                    raw_email = None
-
-                    # The email content is typically at index 1 as a bytearray
-                    if len(data) > 1 and isinstance(data[1], bytearray):
-                        raw_email = bytes(data[1])
-                    else:
-                        # Search through all items for email content
-                        for item in data:
-                            if isinstance(item, bytes | bytearray) and len(item) > 100:
-                                # Skip IMAP protocol responses
-                                if isinstance(item, bytes) and b"FETCH" in item:
-                                    continue
-                                # This is likely the email content
-                                raw_email = bytes(item) if isinstance(item, bytearray) else item
-                                break
+                    # Fetch email using unified method
+                    raw_email, flags_data = await self._fetch_email_data(imap, message_id_str, by_uid=True, include_flags=True)
 
                     if raw_email:
                         try:
@@ -433,72 +428,8 @@ class EmailClient:
         """Get a single email by its UID without truncation."""
         try:
             async with self.imap_connection() as imap:
-                # Try multiple fetch formats to get the email content
-                fetch_formats = [
-                "(BODY.PEEK[] FLAGS)",
-                "(RFC822.PEEK FLAGS)",
-                "(BODY[] FLAGS)",
-                "(RFC822 FLAGS)"
-                ]
-                
-                data = None
-                for fetch_format in fetch_formats:
-                    try:
-                        search_response = await imap.uid("fetch", uid, fetch_format)
-                        if search_response and search_response.result == 'OK' and search_response.lines:
-                            data = search_response.lines
-                            # Check if we actually got email content
-                            has_content = False
-                            for item in data:
-                                if (
-                                    isinstance(item, bytes)
-                                    and b"FETCH (" in item
-                                    and b"RFC822" not in item
-                                    and b"BODY" not in item
-                                ):
-                                    # This is just metadata, not actual content
-                                    continue
-                                elif isinstance(item, bytes | bytearray) and len(item) > 100:
-                                    # This looks like email content
-                                    has_content = True
-                                    break
-                            if has_content:
-                                break
-                            else:
-                                data = None  # Try next format
-                    except Exception as e:
-                        logger.debug(f"Fetch format {fetch_format} failed: {e}")
-                        continue
-
-                if not data:
-                    logger.error(f"No email data found for UID {uid}")
-                    return None
-
-                # Extract flags
-                flags_data = []
-                for item in data:
-                    if isinstance(item, str) and "FLAGS" in item:
-                        flags_match = re.search(r'FLAGS \(([^)]*)\)', item)
-                        if flags_match:
-                            flags_str = flags_match.group(1)
-                            flags_data = [flag.strip().replace('\\', '') for flag in flags_str.split() if flag.strip()]
-                        break
-
-                # Find the email data in the response
-                raw_email = None
-                # The email content is typically at index 1 as a bytearray
-                if len(data) > 1 and isinstance(data[1], bytearray):
-                    raw_email = bytes(data[1])
-                else:
-                    # Search through all items for email content
-                    for item in data:
-                        if isinstance(item, bytes | bytearray) and len(item) > 100:
-                            # Skip IMAP protocol responses
-                            if isinstance(item, bytes) and b"FETCH" in item:
-                                continue
-                            # This is likely the email content
-                            raw_email = bytes(item) if isinstance(item, bytearray) else item
-                            break
+                # Fetch email using unified method
+                raw_email, flags_data = await self._fetch_email_data(imap, uid, by_uid=True, include_flags=True)
 
                 if raw_email:
                     try:
