@@ -270,15 +270,48 @@ class EmailClient:
             logger.info(f"Get: Search criteria: {search_criteria}")
 
             # Search for messages - use UID SEARCH for better compatibility
-            _, messages = await imap.uid_search(*search_criteria)
+            response, messages = await imap.uid_search(*search_criteria)
+            logger.debug(f"Search response status: {response}")
+            
+            # Check if the search command failed
+            if response and hasattr(response, 'result'):
+                if response.result != 'OK':
+                    logger.error(f"IMAP search failed with result: {response.result}")
+                    logger.error(f"Search criteria: {search_criteria}")
+                    if messages:
+                        logger.error(f"Error details: {messages}")
+                    message_ids = []
+                    # Early return on search failure
+                    return
 
             # Handle empty or None responses
             if not messages or not messages[0]:
                 logger.warning("No messages returned from search")
                 message_ids = []
             else:
-                message_ids = messages[0].split()
-                logger.info(f"Found {len(message_ids)} message IDs")
+                # Debug log the raw response
+                logger.debug(f"Raw search response: {messages}")
+                logger.debug(f"messages[0] type: {type(messages[0])}, value: {messages[0]}")
+                
+                # Validate that we have UIDs (should be numeric)
+                try:
+                    # First try to split the response
+                    potential_ids = messages[0].split()
+                    
+                    # Verify at least one ID is numeric (UIDs should be numbers)
+                    if potential_ids:
+                        # Decode first ID and check if numeric
+                        first_id = potential_ids[0].decode('utf-8') if isinstance(potential_ids[0], bytes) else str(potential_ids[0])
+                        int(first_id)  # Will raise ValueError if not numeric
+                    
+                    message_ids = potential_ids
+                    logger.info(f"Found {len(message_ids)} message IDs")
+                    logger.debug(f"Parsed message IDs: {message_ids[:10] if len(message_ids) > 10 else message_ids}")
+                except (ValueError, AttributeError) as e:
+                    # Not valid UIDs - likely an error message
+                    logger.error(f"Invalid IMAP search response (expected UIDs): {messages[0]}")
+                    logger.error(f"Search criteria that triggered this: {search_criteria}")
+                    message_ids = []
             start = (page - 1) * page_size
             end = start + page_size
 
@@ -320,15 +353,16 @@ class EmailClient:
         if since:
             search_criteria.extend(["SINCE", since.strftime("%d-%b-%Y").upper()])
         if subject:
-            search_criteria.extend(["SUBJECT", subject])
+            # Always quote search strings for IMAP consistency
+            search_criteria.extend(["SUBJECT", f'"{subject}"'])
         if body:
-            search_criteria.extend(["BODY", body])
+            search_criteria.extend(["BODY", f'"{body}"'])
         if text:
-            search_criteria.extend(["TEXT", text])
+            search_criteria.extend(["TEXT", f'"{text}"'])
         if from_address:
-            search_criteria.extend(["FROM", from_address])
+            search_criteria.extend(["FROM", f'"{from_address}"'])
         if to_address:
-            search_criteria.extend(["TO", to_address])
+            search_criteria.extend(["TO", f'"{to_address}"'])
         if unread_only:
             search_criteria.append("UNSEEN")
         if flagged_only:
@@ -356,8 +390,28 @@ class EmailClient:
             search_criteria = self._build_search_criteria(before, since, subject, body, text, from_address, to_address, unread_only, flagged_only)
             logger.info(f"Count: Search criteria: {search_criteria}")
             # Search for messages and count them - use UID SEARCH for consistency
-            _, messages = await imap.uid_search(*search_criteria)
-            return len(messages[0].split())
+            response, messages = await imap.uid_search(*search_criteria)
+            
+            # Check if search failed
+            if response and hasattr(response, 'result') and response.result != 'OK':
+                logger.error(f"IMAP count search failed with result: {response.result}")
+                logger.error(f"Search criteria: {search_criteria}")
+                return 0
+            
+            if not messages or not messages[0]:
+                return 0
+                
+            # Validate we have UIDs, not an error message
+            try:
+                potential_ids = messages[0].split()
+                if potential_ids:
+                    # Check first ID is numeric
+                    first_id = potential_ids[0].decode('utf-8') if isinstance(potential_ids[0], bytes) else str(potential_ids[0])
+                    int(first_id)
+                return len(potential_ids)
+            except (ValueError, AttributeError):
+                logger.error(f"Invalid count response: {messages[0]}")
+                return 0
 
     async def list_folders(self, pattern: str = "*") -> list[dict[str, Any]]:
         """List all IMAP folders with details."""

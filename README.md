@@ -69,6 +69,33 @@ To install Email Server for Claude Desktop automatically via [Smithery](https://
 npx -y @smithery/cli install @ai-zerolab/mcp-email-server --client claude
 ```
 
+## Configuration
+
+### Logging
+
+The MCP email server supports flexible logging configuration through environment variables:
+
+- `MCP_EMAIL_SERVER_LOG_LEVEL`: Set the log level (default: "INFO"). Options: DEBUG, INFO, WARNING, ERROR, CRITICAL
+- `MCP_EMAIL_SERVER_LOG_FILE`: Path to log file (default: disabled). When set, logs will be written to both console and file
+- `MCP_EMAIL_SERVER_LOG_ROTATION`: Log rotation size (default: "10 MB"). Examples: "500 KB", "10 MB", "1 GB"
+- `MCP_EMAIL_SERVER_LOG_RETENTION`: How long to keep rotated logs (default: "7 days"). Examples: "7 days", "4 weeks", "6 months"
+
+Example usage with file logging:
+
+```bash
+export MCP_EMAIL_SERVER_LOG_LEVEL=DEBUG
+export MCP_EMAIL_SERVER_LOG_FILE=/home/user/mcp-email-server/logs/server.log
+export MCP_EMAIL_SERVER_LOG_ROTATION="5 MB"
+export MCP_EMAIL_SERVER_LOG_RETENTION="14 days"
+uv run mcp-email-server stdio
+```
+
+When file logging is enabled:
+- Log files are automatically rotated when they reach the specified size
+- Old log files are compressed as .zip files
+- Logs older than the retention period are automatically deleted
+- The log directory is created automatically if it doesn't exist
+
 ## Development
 
 This project is managed using [uv](https://github.com/ai-zerolab/uv).
