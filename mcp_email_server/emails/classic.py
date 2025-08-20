@@ -50,7 +50,15 @@ class EmailClient:
             
             # Select folder if specified
             if select_folder:
-                await imap.select(select_folder)
+                logger.debug(f"Selecting IMAP folder: {select_folder}")
+                select_result = await imap.select(select_folder)
+                
+                # Verify the folder was actually selected
+                if hasattr(select_result, 'result') and select_result.result == 'OK':
+                    logger.debug(f"Successfully selected folder: {select_folder}")
+                else:
+                    logger.error(f"Failed to select folder {select_folder}: {select_result}")
+                    raise Exception(f"Failed to select folder {select_folder}")
                 
             yield imap
             
@@ -264,8 +272,10 @@ class EmailClient:
         flagged_only: bool = False,
         format: str = "html",
         truncate_body: int | None = None,
+        folder: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        async with self.imap_connection() as imap:
+        effective_folder = folder or "INBOX"
+        async with self.imap_connection(select_folder=effective_folder) as imap:
             search_criteria = self._build_search_criteria(before, since, subject, body, text, from_address, to_address, unread_only, flagged_only)
             logger.info(f"Get: Search criteria: {search_criteria}")
 
@@ -385,8 +395,9 @@ class EmailClient:
         to_address: str | None = None,
         unread_only: bool = False,
         flagged_only: bool = False,
+        folder: str | None = None,
     ) -> int:
-        async with self.imap_connection() as imap:
+        async with self.imap_connection(select_folder=folder or "INBOX") as imap:
             search_criteria = self._build_search_criteria(before, since, subject, body, text, from_address, to_address, unread_only, flagged_only)
             logger.info(f"Count: Search criteria: {search_criteria}")
             # Search for messages and count them - use UID SEARCH for consistency
@@ -501,6 +512,107 @@ class EmailClient:
         """Get a single email by its UID without truncation."""
         return await self.get_single_email(uid, format, truncate_body=None)
 
+    def _normalize_flags(self, flags: list[str]) -> list[str]:
+        """Normalize flag format - ensure proper backslash prefix for system flags."""
+        normalized = []
+        for flag in flags:
+            # Remove any existing backslashes and normalize
+            clean_flag = flag.strip().lstrip('\\')
+            
+            # System flags should have backslash prefix
+            system_flags = ['Seen', 'Answered', 'Flagged', 'Deleted', 'Draft', 'Recent']
+            if clean_flag in system_flags:
+                normalized.append(f'\\{clean_flag}')
+            else:
+                # Custom flags - add backslash if not present
+                normalized.append(f'\\{clean_flag}')
+                
+        return normalized
+
+    async def modify_flags(self, uids: list[str], flags: list[str], operation: str, silent: bool = False) -> dict[str, bool]:
+        """Core flag modification method using IMAP STORE command.
+        
+        Args:
+            uids: List of email UIDs to modify
+            flags: List of flags to add/remove/replace
+            operation: One of 'add' (+FLAGS), 'remove' (-FLAGS), 'replace' (FLAGS)
+            silent: Use .SILENT suffix to suppress server responses
+            
+        Returns:
+            Dict mapping UID to success/failure status
+        """
+        if not uids or not flags:
+            return {}
+            
+        # Normalize flags
+        normalized_flags = self._normalize_flags(flags)
+        flags_str = f"({' '.join(normalized_flags)})"
+        
+        # Build STORE command
+        if operation == "add":
+            store_cmd = "+FLAGS.SILENT" if silent else "+FLAGS"
+        elif operation == "remove":
+            store_cmd = "-FLAGS.SILENT" if silent else "-FLAGS"
+        elif operation == "replace":
+            store_cmd = "FLAGS.SILENT" if silent else "FLAGS"
+        else:
+            raise ValueError(f"Invalid operation: {operation}")
+            
+        results = {}
+        
+        try:
+            async with self.imap_connection() as imap:
+                # Convert UIDs to comma-separated string for batch operation
+                uid_list = ','.join(str(uid) for uid in uids)
+                
+                try:
+                    # Execute UID STORE command
+                    response = await imap.uid("store", uid_list, store_cmd, flags_str)
+                    
+                    if response and response.result == 'OK':
+                        # For successful batch operation, mark all UIDs as successful
+                        for uid in uids:
+                            results[str(uid)] = True
+                        logger.info(f"Successfully {operation} flags {flags_str} on {len(uids)} emails")
+                    else:
+                        # Batch failed, mark all as failed
+                        for uid in uids:
+                            results[str(uid)] = False
+                        logger.error(f"Failed to {operation} flags {flags_str}: {response}")
+                        
+                except Exception as e:
+                    # If batch fails, try individual operations for better error isolation
+                    logger.warning(f"Batch flag operation failed, trying individual operations: {e}")
+                    
+                    for uid in uids:
+                        try:
+                            response = await imap.uid("store", str(uid), store_cmd, flags_str)
+                            results[str(uid)] = response and response.result == 'OK'
+                            if not results[str(uid)]:
+                                logger.error(f"Failed to {operation} flags on UID {uid}: {response}")
+                        except Exception as individual_error:
+                            logger.error(f"Error modifying flags on UID {uid}: {individual_error}")
+                            results[str(uid)] = False
+                            
+        except Exception as e:
+            logger.error(f"Error in flag modification: {e}")
+            for uid in uids:
+                results[str(uid)] = False
+                
+        return results
+
+    async def add_flags(self, uids: list[str], flags: list[str], silent: bool = False) -> dict[str, bool]:
+        """Add flags to emails using +FLAGS operation."""
+        return await self.modify_flags(uids, flags, "add", silent)
+
+    async def remove_flags(self, uids: list[str], flags: list[str], silent: bool = False) -> dict[str, bool]:
+        """Remove flags from emails using -FLAGS operation."""
+        return await self.modify_flags(uids, flags, "remove", silent)
+
+    async def replace_flags(self, uids: list[str], flags: list[str], silent: bool = False) -> dict[str, bool]:
+        """Replace all flags on emails using FLAGS operation."""
+        return await self.modify_flags(uids, flags, "replace", silent)
+
     async def send_email(
         self, recipients: list[str], subject: str, body: str, cc: list[str] | None = None, bcc: list[str] | None = None
     ):
@@ -559,13 +671,14 @@ class ClassicEmailHandler(EmailHandler):
         flagged_only: bool = False,
         format: str = "html",
         truncate_body: int | None = None,
+        folder: str | None = None,
     ) -> EmailPageResponse:
         emails = []
         async for email_data in self.incoming_client.get_emails_stream(
-            page, page_size, before, since, subject, body, text, from_address, to_address, order, unread_only, flagged_only, format, truncate_body
+            page, page_size, before, since, subject, body, text, from_address, to_address, order, unread_only, flagged_only, format, truncate_body, folder
         ):
             emails.append(EmailData.from_email(email_data))
-        total = await self.incoming_client.get_email_count(before, since, subject, body, text, from_address, to_address, unread_only, flagged_only)
+        total = await self.incoming_client.get_email_count(before, since, subject, body, text, from_address, to_address, unread_only, flagged_only, folder)
         return EmailPageResponse(
             page=page,
             page_size=page_size,
@@ -591,3 +704,15 @@ class ClassicEmailHandler(EmailHandler):
 
     async def get_email_by_uid(self, uid: str, format: str = "html") -> dict[str, Any] | None:
         return await self.incoming_client.get_email_by_uid(uid, format)
+
+    async def add_flags(self, uids: list[str], flags: list[str], silent: bool = False) -> dict[str, bool]:
+        """Add flags to emails."""
+        return await self.incoming_client.add_flags(uids, flags, silent)
+
+    async def remove_flags(self, uids: list[str], flags: list[str], silent: bool = False) -> dict[str, bool]:
+        """Remove flags from emails."""
+        return await self.incoming_client.remove_flags(uids, flags, silent)
+
+    async def replace_flags(self, uids: list[str], flags: list[str], silent: bool = False) -> dict[str, bool]:
+        """Replace all flags on emails."""
+        return await self.incoming_client.replace_flags(uids, flags, silent)

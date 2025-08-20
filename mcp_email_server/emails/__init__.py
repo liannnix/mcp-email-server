@@ -24,6 +24,7 @@ class EmailHandler(abc.ABC):
         flagged_only: bool = False,
         format: str = "html",
         truncate_body: int | None = None,
+        folder: str | None = None,
     ) -> "EmailPageResponse":
         """
         Get emails

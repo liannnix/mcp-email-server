@@ -73,6 +73,10 @@ async def page_email(
         int | None,
         Field(default=None, description="Maximum number of characters for email body content. If specified, body content longer than this will be truncated."),
     ] = None,
+    folder: Annotated[
+        str | None,
+        Field(default=None, description="Email folder to search in (e.g., 'INBOX.Junk', 'INBOX.Spam'). If not specified, searches INBOX."),
+    ] = None,
 ) -> EmailPageResponse:
     handler = dispatch_handler(account_name)
 
@@ -91,6 +95,7 @@ async def page_email(
         flagged_only=flagged_only,
         format=format,
         truncate_body=truncate_body,
+        folder=folder,
     )
 
 
@@ -223,3 +228,78 @@ async def save_email_to_file(
         }
     except Exception as e:
         return {"success": False, "error": f"Failed to write file: {str(e)}"}
+
+
+@mcp.tool(description="Add flags to one or more emails.")
+async def add_email_flags(
+    account_name: Annotated[str, Field(description="The name of the email account.")],
+    uids: Annotated[list[str | int], Field(description="List of email UIDs to add flags to.")],
+    flags: Annotated[list[str], Field(description="List of flags to add (e.g., ['ProcessedByBot', 'Seen']).")],
+    silent: Annotated[bool, Field(description="Use silent operation to suppress server responses (default: False)")] = False,
+) -> dict[str, Any]:
+    handler = dispatch_handler(account_name)
+    
+    # Convert UIDs to strings
+    uid_strings = [str(uid) for uid in uids]
+    
+    results = await handler.add_flags(uid_strings, flags, silent)
+    
+    successful = sum(results.values())
+    return {
+        "results": results,
+        "total_modified": successful,
+        "failed": len(uids) - successful,
+        "operation": "add_flags",
+        "flags": flags,
+        "silent": silent
+    }
+
+
+@mcp.tool(description="Remove flags from one or more emails.")
+async def remove_email_flags(
+    account_name: Annotated[str, Field(description="The name of the email account.")],
+    uids: Annotated[list[str | int], Field(description="List of email UIDs to remove flags from.")],
+    flags: Annotated[list[str], Field(description="List of flags to remove (e.g., ['ProcessedByBot', 'Flagged']).")],
+    silent: Annotated[bool, Field(description="Use silent operation to suppress server responses (default: False)")] = False,
+) -> dict[str, Any]:
+    handler = dispatch_handler(account_name)
+    
+    # Convert UIDs to strings
+    uid_strings = [str(uid) for uid in uids]
+    
+    results = await handler.remove_flags(uid_strings, flags, silent)
+    
+    successful = sum(results.values())
+    return {
+        "results": results,
+        "total_modified": successful,
+        "failed": len(uids) - successful,
+        "operation": "remove_flags",
+        "flags": flags,
+        "silent": silent
+    }
+
+
+@mcp.tool(description="Replace all flags on one or more emails with the specified flags.")
+async def replace_email_flags(
+    account_name: Annotated[str, Field(description="The name of the email account.")],
+    uids: Annotated[list[str | int], Field(description="List of email UIDs to replace flags on.")],
+    flags: Annotated[list[str], Field(description="List of flags to set (replaces all existing flags).")],
+    silent: Annotated[bool, Field(description="Use silent operation to suppress server responses (default: False)")] = False,
+) -> dict[str, Any]:
+    handler = dispatch_handler(account_name)
+    
+    # Convert UIDs to strings
+    uid_strings = [str(uid) for uid in uids]
+    
+    results = await handler.replace_flags(uid_strings, flags, silent)
+    
+    successful = sum(results.values())
+    return {
+        "results": results,
+        "total_modified": successful,
+        "failed": len(uids) - successful,
+        "operation": "replace_flags",
+        "flags": flags,
+        "silent": silent
+    }
