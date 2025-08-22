@@ -65,17 +65,26 @@ async def page_email(
     ] = "desc",
     unread_only: Annotated[bool, Field(default=False, description="Filter to show only unread emails.")] = False,
     flagged_only: Annotated[bool, Field(default=False, description="Filter to show only flagged emails.")] = False,
-    format: Annotated[
+    output_format: Annotated[
         Literal["html", "markdown"],
-        Field(default="html", description="Output format: 'html' returns original content, 'markdown' converts HTML to markdown or returns plain text as-is."),
+        Field(
+            default="html",
+            description="Output format: 'html' returns original content, 'markdown' converts HTML to markdown or returns plain text as-is.",
+        ),
     ] = "html",
     truncate_body: Annotated[
         int | None,
-        Field(default=None, description="Maximum number of characters for email body content. If specified, body content longer than this will be truncated."),
+        Field(
+            default=None,
+            description="Maximum number of characters for email body content. If specified, body content longer than this will be truncated.",
+        ),
     ] = None,
     folder: Annotated[
         str | None,
-        Field(default=None, description="Email folder to search in (e.g., 'INBOX.Junk', 'INBOX.Spam'). If not specified, searches INBOX."),
+        Field(
+            default=None,
+            description="Email folder to search in (e.g., 'INBOX.Junk', 'INBOX.Spam'). If not specified, searches INBOX.",
+        ),
     ] = None,
 ) -> EmailPageResponse:
     handler = dispatch_handler(account_name)
@@ -93,7 +102,7 @@ async def page_email(
         order=order,
         unread_only=unread_only,
         flagged_only=flagged_only,
-        format=format,
+        output_format=output_format,
         truncate_body=truncate_body,
         folder=folder,
     )
@@ -169,7 +178,7 @@ async def move_emails_to_folder(
         "results": results,
         "total_moved": successful,
         "failed": len(uids) - successful,
-        "target_folder": target_folder
+        "target_folder": target_folder,
     }
 
 
@@ -178,24 +187,29 @@ async def save_email_to_file(
     account_name: Annotated[str, Field(description="The name of the email account.")],
     uid: Annotated[str | int, Field(description="The UID of the email to save.")],
     file_path: Annotated[str, Field(description="The file path where to save the email content.")],
-    format: Annotated[
+    output_format: Annotated[
         Literal["html", "markdown"],
-        Field(default="markdown", description="Output format: 'html' returns original content, 'markdown' converts HTML to markdown or returns plain text as-is."),
+        Field(
+            default="markdown",
+            description="Output format: 'html' returns original content, 'markdown' converts HTML to markdown or returns plain text as-is.",
+        ),
     ] = "markdown",
-    include_headers: Annotated[bool, Field(default=True, description="Include email headers (subject, from, date, etc.) in the saved file.")] = True,
+    include_headers: Annotated[
+        bool, Field(default=True, description="Include email headers (subject, from, date, etc.) in the saved file.")
+    ] = True,
 ) -> dict[str, Any]:
     handler = dispatch_handler(account_name)
-    
+
     # Get the single email by UID without truncation
     uid_str = str(uid)
-    email_data = await handler.get_email_by_uid(uid_str, format=format)
-    
+    email_data = await handler.get_email_by_uid(uid_str, output_format=output_format)
+
     if not email_data:
         return {"success": False, "error": f"Email with UID {uid_str} not found"}
-    
+
     # Build the content to save
     content_parts = []
-    
+
     if include_headers:
         content_parts.extend([
             f"Subject: {email_data.get('subject', 'N/A')}",
@@ -205,29 +219,29 @@ async def save_email_to_file(
             f"Body Format: {email_data.get('body_format', 'unknown')}",
             "",  # Empty line separator
         ])
-    
+
     # Add the body content
-    body = email_data.get('body', '')
+    body = email_data.get("body", "")
     content_parts.append(body)
-    
+
     # Join all parts
-    full_content = '\n'.join(content_parts)
-    
+    full_content = "\n".join(content_parts)
+
     try:
         # Write to file
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             f.write(full_content)
-        
+
         return {
             "success": True,
             "file_path": file_path,
             "content_length": len(full_content),
             "body_length": len(body),
-            "format": format,
-            "includes_headers": include_headers
+            "format": output_format,
+            "includes_headers": include_headers,
         }
     except Exception as e:
-        return {"success": False, "error": f"Failed to write file: {str(e)}"}
+        return {"success": False, "error": f"Failed to write file: {e!s}"}
 
 
 @mcp.tool(description="Add flags to one or more emails.")
@@ -235,15 +249,17 @@ async def add_email_flags(
     account_name: Annotated[str, Field(description="The name of the email account.")],
     uids: Annotated[list[str | int], Field(description="List of email UIDs to add flags to.")],
     flags: Annotated[list[str], Field(description="List of flags to add (e.g., ['ProcessedByBot', 'Seen']).")],
-    silent: Annotated[bool, Field(description="Use silent operation to suppress server responses (default: False)")] = False,
+    silent: Annotated[
+        bool, Field(description="Use silent operation to suppress server responses (default: False)")
+    ] = False,
 ) -> dict[str, Any]:
     handler = dispatch_handler(account_name)
-    
+
     # Convert UIDs to strings
     uid_strings = [str(uid) for uid in uids]
-    
+
     results = await handler.add_flags(uid_strings, flags, silent)
-    
+
     successful = sum(results.values())
     return {
         "results": results,
@@ -251,7 +267,7 @@ async def add_email_flags(
         "failed": len(uids) - successful,
         "operation": "add_flags",
         "flags": flags,
-        "silent": silent
+        "silent": silent,
     }
 
 
@@ -260,15 +276,17 @@ async def remove_email_flags(
     account_name: Annotated[str, Field(description="The name of the email account.")],
     uids: Annotated[list[str | int], Field(description="List of email UIDs to remove flags from.")],
     flags: Annotated[list[str], Field(description="List of flags to remove (e.g., ['ProcessedByBot', 'Flagged']).")],
-    silent: Annotated[bool, Field(description="Use silent operation to suppress server responses (default: False)")] = False,
+    silent: Annotated[
+        bool, Field(description="Use silent operation to suppress server responses (default: False)")
+    ] = False,
 ) -> dict[str, Any]:
     handler = dispatch_handler(account_name)
-    
+
     # Convert UIDs to strings
     uid_strings = [str(uid) for uid in uids]
-    
+
     results = await handler.remove_flags(uid_strings, flags, silent)
-    
+
     successful = sum(results.values())
     return {
         "results": results,
@@ -276,7 +294,7 @@ async def remove_email_flags(
         "failed": len(uids) - successful,
         "operation": "remove_flags",
         "flags": flags,
-        "silent": silent
+        "silent": silent,
     }
 
 
@@ -285,15 +303,17 @@ async def replace_email_flags(
     account_name: Annotated[str, Field(description="The name of the email account.")],
     uids: Annotated[list[str | int], Field(description="List of email UIDs to replace flags on.")],
     flags: Annotated[list[str], Field(description="List of flags to set (replaces all existing flags).")],
-    silent: Annotated[bool, Field(description="Use silent operation to suppress server responses (default: False)")] = False,
+    silent: Annotated[
+        bool, Field(description="Use silent operation to suppress server responses (default: False)")
+    ] = False,
 ) -> dict[str, Any]:
     handler = dispatch_handler(account_name)
-    
+
     # Convert UIDs to strings
     uid_strings = [str(uid) for uid in uids]
-    
+
     results = await handler.replace_flags(uid_strings, flags, silent)
-    
+
     successful = sum(results.values())
     return {
         "results": results,
@@ -301,5 +321,5 @@ async def replace_email_flags(
         "failed": len(uids) - successful,
         "operation": "replace_flags",
         "flags": flags,
-        "silent": silent
+        "silent": silent,
     }

@@ -141,3 +141,9 @@ cython_debug/
 
 tests/config.toml
 local/
+
+# Local MCP server configuration
+.mcp.json
+
+# Claude Code agent configurations
+.claude/

@@ -56,11 +56,13 @@ class TestClassicEmailHandler:
         # Create test data
         now = datetime.now()
         email_data = {
+            "uid": "123",
             "subject": "Test Subject",
             "from": "sender@example.com",
             "body": "Test Body",
             "date": now,
             "attachments": [],
+            "flags": ["Seen"],
         }
 
         # Mock the get_emails_stream method to yield our test data
@@ -104,11 +106,11 @@ class TestClassicEmailHandler:
                 assert result.emails[0].attachments == []
                 assert result.total == 1
 
-                # Verify the client methods were called correctly
+                # Verify the client methods were called correctly  
                 classic_handler.incoming_client.get_emails_stream.assert_called_once_with(
-                    1, 10, now, None, "Test", None, None, "sender@example.com", None, "desc"
+                    1, 10, now, None, "Test", None, None, "sender@example.com", None, "desc", False, False, "html", None, None
                 )
-                mock_count.assert_called_once_with(now, None, "Test", None, None, "sender@example.com", None)
+                mock_count.assert_called_once_with(now, None, "Test", None, None, "sender@example.com", None, False, False, None)
 
     @pytest.mark.asyncio
     async def test_send_email(self, classic_handler):
@@ -135,3 +137,54 @@ class TestClassicEmailHandler:
                 ["cc@example.com"],
                 ["bcc@example.com"],
             )
+
+    @pytest.mark.asyncio
+    async def test_add_flags(self, classic_handler):
+        """Test add_flags method."""
+        # Mock the incoming_client.add_flags method
+        mock_add_flags = AsyncMock(return_value={"123": True, "456": True})
+
+        # Apply the mock
+        with patch.object(classic_handler.incoming_client, "add_flags", mock_add_flags):
+            # Call the method
+            result = await classic_handler.add_flags(["123", "456"], ["Flagged"])
+
+            # Verify the result
+            assert result == {"123": True, "456": True}
+
+            # Verify the client method was called correctly
+            mock_add_flags.assert_called_once_with(["123", "456"], ["Flagged"], False)
+
+    @pytest.mark.asyncio
+    async def test_remove_flags(self, classic_handler):
+        """Test remove_flags method."""
+        # Mock the incoming_client.remove_flags method
+        mock_remove_flags = AsyncMock(return_value={"789": True})
+
+        # Apply the mock
+        with patch.object(classic_handler.incoming_client, "remove_flags", mock_remove_flags):
+            # Call the method
+            result = await classic_handler.remove_flags(["789"], ["Seen"], silent=True)
+
+            # Verify the result
+            assert result == {"789": True}
+
+            # Verify the client method was called correctly
+            mock_remove_flags.assert_called_once_with(["789"], ["Seen"], True)
+
+    @pytest.mark.asyncio
+    async def test_move_to_folder(self, classic_handler):
+        """Test move_to_folder method."""
+        # Mock the incoming_client.move_to_folder method
+        mock_move = AsyncMock(return_value=True)
+
+        # Apply the mock
+        with patch.object(classic_handler.incoming_client, "move_to_folder", mock_move):
+            # Call the method
+            result = await classic_handler.move_to_folder("123", "Archive")
+
+            # Verify the result
+            assert result is True
+
+            # Verify the client method was called correctly
+            mock_move.assert_called_once_with("123", "Archive", True)

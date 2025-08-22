@@ -91,6 +91,7 @@ uv run mcp-email-server stdio
 ```
 
 When file logging is enabled:
+
 - Log files are automatically rotated when they reach the specified size
 - Old log files are compressed as .zip files
 - Logs older than the retention period are automatically deleted

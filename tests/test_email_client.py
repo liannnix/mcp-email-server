@@ -52,7 +52,7 @@ class TestEmailClient:
         raw_email = msg.as_bytes()
 
         client = EmailClient(MagicMock())
-        result = client._parse_email_data(raw_email)
+        result = client._parse_email_data(raw_email, "123", [], "html", None)
 
         assert result["subject"] == "Test Subject"
         assert result["from"] == "sender@example.com"
@@ -89,7 +89,7 @@ class TestEmailClient:
             mock_parse.return_value = mock_email
 
             client = EmailClient(MagicMock())
-            result = client._parse_email_data(b"dummy email content")
+            result = client._parse_email_data(b"dummy email content", "123", [], "html", None)
 
             assert result["subject"] == "Test Subject"
             assert result["from"] == "sender@example.com"
@@ -115,29 +115,29 @@ class TestEmailClient:
 
         # Test with subject
         criteria = EmailClient._build_search_criteria(subject="Test")
-        assert criteria == ["SUBJECT", "Test"]
+        assert criteria == ["SUBJECT", '"Test"']
 
         # Test with body
         criteria = EmailClient._build_search_criteria(body="Test")
-        assert criteria == ["BODY", "Test"]
+        assert criteria == ["BODY", '"Test"']
 
         # Test with text
         criteria = EmailClient._build_search_criteria(text="Test")
-        assert criteria == ["TEXT", "Test"]
+        assert criteria == ["TEXT", '"Test"']
 
         # Test with from_address
         criteria = EmailClient._build_search_criteria(from_address="test@example.com")
-        assert criteria == ["FROM", "test@example.com"]
+        assert criteria == ["FROM", '"test@example.com"']
 
         # Test with to_address
         criteria = EmailClient._build_search_criteria(to_address="test@example.com")
-        assert criteria == ["TO", "test@example.com"]
+        assert criteria == ["TO", '"test@example.com"']
 
         # Test with multiple criteria
         criteria = EmailClient._build_search_criteria(
             subject="Test", from_address="test@example.com", since=datetime(2023, 1, 1)
         )
-        assert criteria == ["SINCE", "01-JAN-2023", "SUBJECT", "Test", "FROM", "test@example.com"]
+        assert criteria == ["SINCE", "01-JAN-2023", "SUBJECT", '"Test"', "FROM", '"test@example.com"']
 
     @pytest.mark.asyncio
     async def test_get_emails_stream(self, email_client):
@@ -148,7 +148,9 @@ class TestEmailClient:
         mock_imap._client_task.set_result(None)
         mock_imap.wait_hello_from_server = AsyncMock()
         mock_imap.login = AsyncMock()
-        mock_imap.select = AsyncMock()
+        mock_select_result = MagicMock()
+        mock_select_result.result = "OK"
+        mock_imap.select = AsyncMock(return_value=mock_select_result)
         mock_imap.search = AsyncMock(return_value=(None, [b"1 2 3"]))
         mock_imap.uid_search = AsyncMock(return_value=(None, [b"1 2 3"]))
         mock_imap.fetch = AsyncMock(return_value=(None, [b"HEADER", bytearray(b"EMAIL CONTENT")]))
@@ -159,9 +161,11 @@ Subject: Test Subject\r
 Date: Mon, 1 Jan 2024 00:00:00 +0000\r
 \r
 This is the email body."""
-        mock_imap.uid = AsyncMock(
-            return_value=(None, [b"1 FETCH (UID 1 RFC822 {%d}" % len(test_email), bytearray(test_email)])
-        )
+        # Mock the uid method to return proper response format for _fetch_email_data
+        mock_response = MagicMock()
+        mock_response.result = "OK"
+        mock_response.lines = [b"1 FETCH (UID 1 FLAGS (\\Seen))", bytearray(test_email)]
+        mock_imap.uid = AsyncMock(return_value=mock_response)
         mock_imap.logout = AsyncMock()
 
         # Mock IMAP class
@@ -194,6 +198,197 @@ This is the email body."""
                 assert mock_imap.uid.call_count == 3
                 mock_imap.logout.assert_called_once()
 
+    def test_extract_email_and_flags_with_bytes(self):
+        """Test extracting email content and flags from bytes response."""
+        client = EmailClient(MagicMock())
+        
+        # Mock IMAP response with bytes (the bug we fixed!)
+        response_lines = [
+            b'1 FETCH (UID 1 FLAGS (\\Seen \\Flagged))',
+            bytearray(b'From: test@example.com\r\nSubject: Test\r\n\r\nTest body')
+        ]
+        
+        raw_email, flags = client._extract_email_and_flags(response_lines)
+        
+        assert raw_email == b'From: test@example.com\r\nSubject: Test\r\n\r\nTest body'
+        assert flags == ['Seen', 'Flagged']
+
+    def test_extract_email_and_flags_with_strings(self):
+        """Test extracting email content and flags from string response."""
+        client = EmailClient(MagicMock())
+        
+        # Mock IMAP response with strings
+        response_lines = [
+            '1 FETCH (UID 1 FLAGS (\\Seen NonJunk))',
+            bytearray(b'From: test@example.com\r\nSubject: Test\r\n\r\nTest body')
+        ]
+        
+        raw_email, flags = client._extract_email_and_flags(response_lines)
+        
+        assert raw_email == b'From: test@example.com\r\nSubject: Test\r\n\r\nTest body'
+        assert flags == ['Seen', 'NonJunk']
+
+    def test_extract_email_and_flags_no_flags(self):
+        """Test extracting email content when no flags are present."""
+        client = EmailClient(MagicMock())
+        
+        # Mock IMAP response without flags
+        response_lines = [
+            b'1 FETCH (UID 1)',
+            bytearray(b'From: test@example.com\r\nSubject: Test\r\n\r\nTest body')
+        ]
+        
+        raw_email, flags = client._extract_email_and_flags(response_lines)
+        
+        assert raw_email == b'From: test@example.com\r\nSubject: Test\r\n\r\nTest body'
+        assert flags == []
+
+    def test_normalize_flags(self):
+        """Test flag normalization for IMAP consistency."""
+        client = EmailClient(MagicMock())
+        
+        # Test various flag formats
+        flags = ['Seen', '\\Flagged', 'NonJunk', '\\Deleted']
+        normalized = client._normalize_flags(flags)
+        
+        assert normalized == ['\\Seen', '\\Flagged', '\\NonJunk', '\\Deleted']
+
+    @pytest.mark.asyncio
+    async def test_add_flags(self, email_client):
+        """Test adding flags to emails."""
+        # Mock IMAP client
+        mock_imap = AsyncMock()
+        mock_imap._client_task = asyncio.Future()
+        mock_imap._client_task.set_result(None)
+        mock_imap.wait_hello_from_server = AsyncMock()
+        mock_imap.login = AsyncMock()
+        mock_select_result = MagicMock()
+        mock_select_result.result = "OK"
+        mock_imap.select = AsyncMock(return_value=mock_select_result)
+        
+        # Mock successful flag operation
+        mock_response = MagicMock()
+        mock_response.result = "OK"
+        mock_imap.uid = AsyncMock(return_value=mock_response)
+        mock_imap.logout = AsyncMock()
+
+        # Mock IMAP class
+        with patch.object(email_client, "imap_class", return_value=mock_imap):
+            result = await email_client.add_flags(["123", "456"], ["Flagged"])
+
+            # Verify the result
+            assert result == {"123": True, "456": True}
+            
+            # Verify IMAP methods were called correctly
+            mock_imap.login.assert_called_once_with(
+                email_client.email_server.user_name, email_client.email_server.password
+            )
+            mock_imap.select.assert_called_once_with("INBOX")
+            mock_imap.uid.assert_called_once_with("store", "123,456", "+FLAGS", "(\\Flagged)")
+            mock_imap.logout.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_remove_flags(self, email_client):
+        """Test removing flags from emails."""
+        # Mock IMAP client
+        mock_imap = AsyncMock()
+        mock_imap._client_task = asyncio.Future()
+        mock_imap._client_task.set_result(None)
+        mock_imap.wait_hello_from_server = AsyncMock()
+        mock_imap.login = AsyncMock()
+        mock_select_result = MagicMock()
+        mock_select_result.result = "OK"
+        mock_imap.select = AsyncMock(return_value=mock_select_result)
+        
+        # Mock successful flag operation
+        mock_response = MagicMock()
+        mock_response.result = "OK"
+        mock_imap.uid = AsyncMock(return_value=mock_response)
+        mock_imap.logout = AsyncMock()
+
+        # Mock IMAP class
+        with patch.object(email_client, "imap_class", return_value=mock_imap):
+            result = await email_client.remove_flags(["789"], ["Seen"])
+
+            # Verify the result
+            assert result == {"789": True}
+            
+            # Verify IMAP methods were called correctly
+            mock_imap.uid.assert_called_once_with("store", "789", "-FLAGS", "(\\Seen)")
+
+    @pytest.mark.asyncio
+    async def test_move_to_folder(self, email_client):
+        """Test moving email to folder using MOVE command."""
+        # Mock IMAP client
+        mock_imap = AsyncMock()
+        mock_imap._client_task = asyncio.Future()
+        mock_imap._client_task.set_result(None)
+        mock_imap.wait_hello_from_server = AsyncMock()
+        mock_imap.login = AsyncMock()
+        mock_select_result = MagicMock()
+        mock_select_result.result = "OK"
+        mock_imap.select = AsyncMock(return_value=mock_select_result)
+        
+        # Mock successful MOVE command
+        mock_response = MagicMock()
+        mock_response.result = "OK"
+        mock_imap.uid = AsyncMock(return_value=mock_response)
+        mock_imap.logout = AsyncMock()
+
+        # Mock IMAP class and folder creation
+        with patch.object(email_client, "imap_class", return_value=mock_imap):
+            with patch.object(email_client, "create_folder_if_needed", return_value=True):
+                result = await email_client.move_to_folder("123", "Archive")
+
+                # Verify the result
+                assert result is True
+                
+                # Verify IMAP methods were called correctly
+                mock_imap.login.assert_called_once_with(
+                    email_client.email_server.user_name, email_client.email_server.password
+                )
+                mock_imap.select.assert_called_once_with("INBOX")
+                mock_imap.uid.assert_called_once_with("move", "123", "Archive")
+                mock_imap.logout.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_list_folders(self, email_client):
+        """Test listing email folders."""
+        # Mock IMAP client
+        mock_imap = AsyncMock()
+        mock_imap._client_task = asyncio.Future()
+        mock_imap._client_task.set_result(None)
+        mock_imap.wait_hello_from_server = AsyncMock()
+        mock_imap.login = AsyncMock()
+        
+        # Mock folder list response - return tuple as expected
+        mock_imap.list = AsyncMock(return_value=(
+            "OK",
+            [
+                b'(\\HasNoChildren) "." "INBOX"',
+                b'(\\HasNoChildren) "." "INBOX.Sent"',
+                b'(\\HasNoChildren) "." "INBOX.Archive"'
+            ]
+        ))
+        mock_imap.logout = AsyncMock()
+
+        # Mock IMAP class
+        with patch.object(email_client, "imap_class", return_value=mock_imap):
+            folders = await email_client.list_folders()
+
+            # Verify the result
+            assert len(folders) == 3
+            assert any(folder["name"] == "INBOX" for folder in folders)
+            assert any(folder["name"] == "INBOX.Sent" for folder in folders)
+            assert any(folder["name"] == "INBOX.Archive" for folder in folders)
+            
+            # Verify IMAP methods were called correctly
+            mock_imap.login.assert_called_once_with(
+                email_client.email_server.user_name, email_client.email_server.password
+            )
+            mock_imap.list.assert_called_once_with('""', "*")
+            mock_imap.logout.assert_called_once()
+
     @pytest.mark.asyncio
     async def test_get_email_count(self, email_client):
         """Test getting email count."""
@@ -203,7 +398,9 @@ This is the email body."""
         mock_imap._client_task.set_result(None)
         mock_imap.wait_hello_from_server = AsyncMock()
         mock_imap.login = AsyncMock()
-        mock_imap.select = AsyncMock()
+        mock_select_result = MagicMock()
+        mock_select_result.result = "OK"
+        mock_imap.select = AsyncMock(return_value=mock_select_result)
         mock_imap.search = AsyncMock(return_value=(None, [b"1 2 3 4 5"]))
         mock_imap.uid_search = AsyncMock(return_value=(None, [b"1 2 3 4 5"]))
         mock_imap.logout = AsyncMock()

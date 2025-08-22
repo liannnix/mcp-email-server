@@ -29,9 +29,9 @@ class EmailData(BaseModel):
             date=email["date"],
             attachments=email["attachments"],
             flags=flags,
-            is_read="\\Seen" in flags,
-            is_flagged="\\Flagged" in flags,
-            is_answered="\\Answered" in flags,
+            is_read="Seen" in flags,
+            is_flagged="Flagged" in flags,
+            is_answered="Answered" in flags,
         )
 
 

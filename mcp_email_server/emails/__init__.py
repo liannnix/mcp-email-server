@@ -22,7 +22,7 @@ class EmailHandler(abc.ABC):
         order: str = "desc",
         unread_only: bool = False,
         flagged_only: bool = False,
-        format: str = "html",
+        output_format: str = "html",
         truncate_body: int | None = None,
         folder: str | None = None,
     ) -> "EmailPageResponse":
@@ -51,7 +51,7 @@ class EmailHandler(abc.ABC):
         """
 
     @abc.abstractmethod
-    async def get_email_by_uid(self, uid: str, format: str = "html") -> dict[str, Any] | None:
+    async def get_email_by_uid(self, uid: str, output_format: str = "html") -> dict[str, Any] | None:
         """
         Get a single email by its UID without truncation
         """

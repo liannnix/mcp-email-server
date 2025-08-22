@@ -15,7 +15,7 @@ if LOG_TO_FILE:
     # Ensure log directory exists
     log_path = Path(LOG_TO_FILE)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Add file handler with rotation and retention
     logger.add(
         LOG_TO_FILE,
@@ -25,7 +25,7 @@ if LOG_TO_FILE:
         compression="zip",  # Compress rotated logs
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {name}:{function}:{line} - {message}",
         backtrace=True,  # Include traceback on errors
-        diagnose=True,   # Include variable values in tracebacks
+        diagnose=True,  # Include variable values in tracebacks
     )
     logger.info(f"File logging enabled: {LOG_TO_FILE}")
 

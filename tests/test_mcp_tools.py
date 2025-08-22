@@ -101,11 +101,16 @@ class TestMcpTools:
         # Create test data
         now = datetime.now()
         email_data = EmailData(
+            uid="123",
             subject="Test Subject",
             sender="sender@example.com",
             body="Test Body",
             date=now,
             attachments=[],
+            flags=["Seen"],
+            is_read=True,
+            is_flagged=False,
+            is_answered=False,
         )
 
         email_page = EmailPageResponse(
@@ -160,6 +165,11 @@ class TestMcpTools:
                 from_address="sender@example.com",
                 to_address=None,
                 order="desc",
+                unread_only=False,
+                flagged_only=False,
+                output_format="html",
+                truncate_body=None,
+                folder=None,
             )
 
     @pytest.mark.asyncio
