@@ -139,21 +139,7 @@ async def list_email_folders(
     return await handler.list_folders(pattern)
 
 
-@mcp.tool(description="Move an email to a specific folder. Creates folder if it doesn't exist.")
-async def move_email_to_folder(
-    account_name: Annotated[str, Field(description="The name of the email account.")],
-    uid: Annotated[str | int, Field(description="The UID of the email to move.")],
-    target_folder: Annotated[str, Field(description="The target folder name (e.g., 'Archive', 'Trash', 'Important').")],
-    create_if_missing: Annotated[bool, Field(description="Create folder if it doesn't exist (default: true)")] = True,
-) -> dict[str, bool]:
-    handler = dispatch_handler(account_name)
-    # Convert uid to string if it comes in as an integer
-    uid_str = str(uid)
-    success = await handler.move_to_folder(uid_str, target_folder, create_if_missing)
-    return {"success": success}
-
-
-@mcp.tool(description="Move multiple emails to a specific folder.")
+@mcp.tool(description="Move one or more emails to a specific folder.")
 async def move_emails_to_folder(
     account_name: Annotated[str, Field(description="The name of the email account.")],
     uids: Annotated[list[str | int], Field(description="List of email UIDs to move.")],
