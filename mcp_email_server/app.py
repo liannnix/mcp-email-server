@@ -12,20 +12,34 @@ from mcp_email_server.config import (
 )
 from mcp_email_server.emails.dispatcher import dispatch_handler
 from mcp_email_server.emails.models import EmailPageResponse
+from mcp_email_server.log import logger
 
 mcp = FastMCP("email")
+
+logger.info("MCP Email Server initialized")
 
 
 @mcp.resource("email://{account_name}")
 async def get_account(account_name: str) -> EmailSettings | ProviderSettings | None:
+    logger.debug(f"Getting account: {account_name}")
     settings = get_settings()
-    return settings.get_account(account_name, masked=True)
+    account = settings.get_account(account_name, masked=True)
+    logger.debug(f"Account found: {account is not None}")
+    return account
 
 
 @mcp.tool()
 async def list_available_accounts() -> list[AccountAttributes]:
+    logger.debug("Listing available accounts")
     settings = get_settings()
-    return [account.masked() for account in settings.get_accounts()]
+    logger.debug(f"Settings loaded from: {settings.model_config.get('toml_file', 'unknown')}")
+    all_accounts = settings.get_accounts()
+    logger.debug(f"Total accounts found: {len(all_accounts)}")
+    for i, account in enumerate(all_accounts):
+        logger.debug(f"Account {i}: {account.account_name} ({type(account).__name__})")
+    accounts = [account.masked() for account in all_accounts]
+    logger.debug(f"Returning {len(accounts)} masked accounts")
+    return accounts
 
 
 @mcp.tool()
@@ -124,10 +138,13 @@ async def send_email(
         list[str] | None,
         Field(default=None, description="A list of BCC email addresses."),
     ] = None,
-) -> None:
+) -> str:
+    logger.debug(f"Sending email from {account_name} to {len(recipients)} recipients")
     handler = dispatch_handler(account_name)
     await handler.send_email(recipients, subject, body, cc, bcc)
-    return
+    recipient_str = ", ".join(recipients)
+    logger.info(f"Email sent successfully to {recipient_str}")
+    return f"Email sent successfully to {recipient_str}"
 
 
 @mcp.tool(description="List all available email folders/labels in the account.")
